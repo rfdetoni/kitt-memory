@@ -146,10 +146,18 @@ impl MemoryStore for SqliteMemoryStore {
             .write_lock
             .lock()
             .map_err(|_| MemoryError::Storage("memory write lock poisoned".into()))?;
-        self.with_conn(|conn| conn.execute(
-            "INSERT INTO memories(id,namespace,workspace_id,kind,content,normalized_content,status,sensitivity,scope,importance,confidence,created_at,updated_at,last_accessed_at,access_count,valid_until,supersedes_id,content_hash,pinned,metadata_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20) ON CONFLICT(id) DO UPDATE SET namespace=excluded.namespace,workspace_id=excluded.workspace_id,kind=excluded.kind,content=excluded.content,normalized_content=excluded.normalized_content,status=excluded.status,sensitivity=excluded.sensitivity,scope=excluded.scope,importance=excluded.importance,confidence=excluded.confidence,updated_at=excluded.updated_at,last_accessed_at=excluded.last_accessed_at,access_count=excluded.access_count,valid_until=excluded.valid_until,supersedes_id=excluded.supersedes_id,content_hash=excluded.content_hash,pinned=excluded.pinned,metadata_json=excluded.metadata_json",
-            params![m.id,m.namespace,m.workspace_id,m.kind.as_db(),m.content,m.normalized_content,m.status.as_db(),m.sensitivity.as_db(),m.scope.as_db(),m.importance,m.confidence,m.created_at,m.updated_at,m.last_accessed_at,m.access_count as i64,m.valid_until,m.supersedes_id,m.content_hash,m.pinned as i64,m.metadata_json]
-        ))?;
+        self.with_conn(|conn| {
+            let mut merged = m.clone();
+            if let Some(existing) = load_one(conn, &m.id)? {
+                // Sensitivity is a monotonic security property. Import/migrate
+                // paths must never make an already stored record less strict.
+                merged.sensitivity = existing.sensitivity.most_restrictive(m.sensitivity);
+            }
+            conn.execute(
+                "INSERT INTO memories(id,namespace,workspace_id,kind,content,normalized_content,status,sensitivity,scope,importance,confidence,created_at,updated_at,last_accessed_at,access_count,valid_until,supersedes_id,content_hash,pinned,metadata_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20) ON CONFLICT(id) DO UPDATE SET namespace=excluded.namespace,workspace_id=excluded.workspace_id,kind=excluded.kind,content=excluded.content,normalized_content=excluded.normalized_content,status=excluded.status,sensitivity=excluded.sensitivity,scope=excluded.scope,importance=excluded.importance,confidence=excluded.confidence,updated_at=excluded.updated_at,last_accessed_at=excluded.last_accessed_at,access_count=excluded.access_count,valid_until=excluded.valid_until,supersedes_id=excluded.supersedes_id,content_hash=excluded.content_hash,pinned=excluded.pinned,metadata_json=excluded.metadata_json",
+                params![merged.id,merged.namespace,merged.workspace_id,merged.kind.as_db(),merged.content,merged.normalized_content,merged.status.as_db(),merged.sensitivity.as_db(),merged.scope.as_db(),merged.importance,merged.confidence,merged.created_at,merged.updated_at,merged.last_accessed_at,merged.access_count as i64,merged.valid_until,merged.supersedes_id,merged.content_hash,merged.pinned as i64,merged.metadata_json]
+            )
+        })?;
         Ok(())
     }
 
@@ -383,6 +391,33 @@ mod tests {
         assert_eq!(first.id, weaker.id);
         assert_eq!(Sensitivity::Secret, weaker.sensitivity);
         assert!(weaker.pinned);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn upsert_record_never_downgrades_sensitivity() {
+        let path = temp_db("kitt-memory-upsert-sensitivity");
+        let store = SqliteMemoryStore::open(&path).unwrap();
+        let original = store
+            .remember(memory("migration fact", Sensitivity::Secret, true))
+            .unwrap();
+        let mut imported = original.clone();
+        imported.sensitivity = Sensitivity::Public;
+        imported.content = "migration fact updated".into();
+        store.upsert_record(&imported).unwrap();
+
+        let rows = store
+            .recall(&RecallQuery {
+                namespace: "assistant".into(),
+                workspace_id: "global".into(),
+                text: "migration fact".into(),
+                limit: 5,
+                allow_private: true,
+                allow_secret: true,
+            })
+            .unwrap();
+        let row = rows.iter().find(|row| row.id == original.id).unwrap();
+        assert_eq!(Sensitivity::Secret, row.sensitivity);
         let _ = std::fs::remove_file(path);
     }
 }
