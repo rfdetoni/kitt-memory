@@ -1,0 +1,10 @@
+[package]
+name = "kitt-memory-migrate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+kitt-memory-core = { path = "../../crates/kitt-memory-core" }
+kitt-memory-sqlite = { path = "../../crates/kitt-memory-sqlite" }

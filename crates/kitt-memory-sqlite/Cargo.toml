@@ -1,0 +1,11 @@
+[package]
+name = "kitt-memory-sqlite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+kitt-memory-core = { path = "../kitt-memory-core" }
+rusqlite.workspace = true
+serde_json.workspace = true
