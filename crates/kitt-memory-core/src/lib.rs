@@ -72,6 +72,7 @@ pub enum Sensitivity {
     Secret,
     Ephemeral,
 }
+
 impl Sensitivity {
     pub fn as_db(self) -> &'static str {
         match self {
@@ -91,6 +92,22 @@ impl Sensitivity {
             _ => Self::Private,
         }
     }
+    pub fn restriction_rank(self) -> u8 {
+        match self {
+            Self::Public => 0,
+            Self::Personal => 1,
+            Self::Private => 2,
+            Self::Secret => 3,
+            Self::Ephemeral => 4,
+        }
+    }
+    pub fn most_restrictive(self, other: Self) -> Self {
+        if self.restriction_rank() >= other.restriction_rank() {
+            self
+        } else {
+            other
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -100,6 +117,7 @@ pub enum MemoryScope {
     Workspace,
     Conversation,
 }
+
 impl MemoryScope {
     pub fn as_db(&self) -> &'static str {
         match self {
@@ -124,6 +142,7 @@ pub enum MemoryStatus {
     Superseded,
     Archived,
 }
+
 impl MemoryStatus {
     pub fn as_db(&self) -> &'static str {
         match self {
@@ -274,7 +293,6 @@ pub fn now_epoch() -> i64 {
         .unwrap_or_default()
         .as_secs() as i64
 }
-
 pub fn lexical_score(query: &str, memory: &MemoryRecord, now: i64) -> f32 {
     let terms: std::collections::HashSet<_> = normalize(query)
         .split_whitespace()
@@ -311,5 +329,16 @@ mod tests {
     #[test]
     fn normalization_is_stable() {
         assert_eq!("hello world", normalize("  Hello   WORLD "));
+    }
+    #[test]
+    fn sensitivity_is_monotonic() {
+        assert_eq!(
+            Sensitivity::Secret,
+            Sensitivity::Public.most_restrictive(Sensitivity::Secret)
+        );
+        assert_eq!(
+            Sensitivity::Private,
+            Sensitivity::Private.most_restrictive(Sensitivity::Personal)
+        );
     }
 }
