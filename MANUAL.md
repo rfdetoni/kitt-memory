@@ -86,20 +86,21 @@ export RUST_LOG="kitt_memory=debug"
 
 ## 5. Guia de Uso da CLI `kitt-memory-migrate`
 
-### Inspecionar Status e Schema do Banco:
+A ferramenta `kitt-memory-migrate` realiza a migração de memórias da base legada do `kitt-agent-cli` para a base canônica do `kitt-memory`:
+
+### Sintaxe de Execução:
 ```bash
-cargo run --release --bin kitt-memory-migrate -- --db ~/.kitt/history/history.sqlite3 --status
+cargo run --release --bin kitt-memory-migrate -- <caminho/origem-agent-cli.db> <caminho/destino-kitt-memory.db>
 ```
 
-### Migrar Base Legada (ex: v4 ou agent-cli legada) para Schema V1:
+### Exemplo Prático:
 ```bash
-cargo run --release --bin kitt-memory-migrate -- --source /caminho/antigo.db --target ~/.kitt/history/history.sqlite3 --migrate
+# Migrar memórias históricas do agente para a base compartilhada
+cargo run --release --bin kitt-memory-migrate -- \
+  ~/.kitt/history/history.sqlite3 \
+  ~/.config/kitt/memory.db
 ```
-
-### Executar Verificação de Integridade e Re-indexação:
-```bash
-cargo run --release --bin kitt-memory-migrate -- --db ~/.kitt/history/history.sqlite3 --vacuum
-```
+*Saída esperada:* `imported X memories`
 
 ---
 
