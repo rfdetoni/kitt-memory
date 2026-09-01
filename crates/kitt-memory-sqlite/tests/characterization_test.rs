@@ -4,6 +4,9 @@ use rusqlite::Connection;
 use std::sync::Arc;
 use std::thread;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 fn temp_db_path(prefix: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir();
     let nanos = std::time::SystemTime::now()
@@ -355,6 +358,37 @@ fn test_concurrent_sqlite_readers_writers() {
     assert_eq!(all.len(), 50);
 
     let _ = std::fs::remove_file(&db);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_database_file_is_private_and_symlink_target_is_rejected() {
+    let db = temp_db_path("private-mode");
+    let store = SqliteMemoryStore::open(&db).unwrap();
+    let mode = std::fs::metadata(&db).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    drop(store);
+    let _ = std::fs::remove_file(&db);
+
+    let target = temp_db_path("symlink-target");
+    std::fs::write(&target, b"not a sqlite database").unwrap();
+    let link = temp_db_path("symlink-link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    assert!(SqliteMemoryStore::open(&link).is_err());
+    let _ = std::fs::remove_file(&link);
+    let _ = std::fs::remove_file(&target);
+}
+
+#[test]
+fn test_missing_legacy_source_is_not_created() {
+    let dest = temp_db_path("legacy-dest");
+    let missing = temp_db_path("legacy-missing");
+    let store = SqliteMemoryStore::open(&dest).unwrap();
+    assert!(!missing.exists());
+    assert!(store.import_legacy_agent_db(&missing).is_err());
+    assert!(!missing.exists());
+    drop(store);
+    let _ = std::fs::remove_file(&dest);
 }
 
 #[test]

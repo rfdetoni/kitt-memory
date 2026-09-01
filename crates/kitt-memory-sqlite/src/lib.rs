@@ -2,13 +2,60 @@ use kitt_memory_core::{
     MemoryError, MemoryKind, MemoryRecord, MemoryScope, MemoryStatus, MemoryStore, NewMemory,
     RecallQuery, Result, Sensitivity, lexical_score, now_epoch,
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::{
     collections::HashMap,
+    fs::{self, OpenOptions},
     path::{Path, PathBuf},
     sync::Mutex,
     time::Duration,
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+fn ensure_private_database_file(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(MemoryError::Storage(format!(
+                    "memory database must not be a symlink: {}",
+                    path.display()
+                )));
+            }
+            if !metadata.is_file() {
+                return Err(MemoryError::Storage(format!(
+                    "memory database must be a regular file: {}",
+                    path.display()
+                )));
+            }
+            #[cfg(unix)]
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(storage)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            options.open(path).map_err(storage)?;
+            #[cfg(unix)]
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(storage)?;
+        }
+        Err(error) => return Err(storage(error)),
+    }
+    Ok(())
+}
+
+fn open_legacy_read_only(path: &Path) -> Result<Connection> {
+    let metadata = fs::symlink_metadata(path).map_err(storage)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(MemoryError::Storage(format!(
+            "legacy memory source must be a regular non-symlink file: {}",
+            path.display()
+        )));
+    }
+    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(storage)
+}
 
 pub struct SqliteMemoryStore {
     path: PathBuf,
@@ -21,6 +68,7 @@ impl SqliteMemoryStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(storage)?;
         }
+        ensure_private_database_file(&path)?;
         let store = Self {
             path,
             write_lock: Mutex::new(()),
@@ -46,7 +94,7 @@ impl SqliteMemoryStore {
     }
 
     pub fn import_legacy_agent_db(&self, source: impl AsRef<Path>) -> Result<usize> {
-        let source = Connection::open(source).map_err(storage)?;
+        let source = open_legacy_read_only(source.as_ref())?;
         let mut stmt = source.prepare("SELECT id, workspace_id, kind, content, normalized_content, status, importance, confidence, created_at, updated_at, last_accessed_at, access_count, valid_until, supersedes_id, content_hash, pinned, COALESCE(metadata_json,'{}') FROM memories").map_err(storage)?;
         let rows = stmt
             .query_map([], |r| {
