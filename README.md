@@ -1,47 +1,88 @@
-# KITT Memory
+# K.I.T.T. Memory
 
-> Shared persistent memory engine for the KITT ecosystem, built in Rust with SQLite WAL.
+<p align="center">
+  <strong>Persistent local memory engine for the K.I.T.T. ecosystem.</strong><br>
+  Rust · SQLite WAL · lexical retrieval · exact deduplication · privacy-aware egress
+</p>
 
-Provides high-performance structured memory storage, lexical ranking, exact deduplication, expiry pruning, monotonic sensitivity enforcement, and migration utilities for Agent CLI databases.
+<p align="center">
+  <a href="https://github.com/rfdetoni/kitt-memory/blob/main/LICENSE"><img alt="License MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <img alt="Rust" src="https://img.shields.io/badge/Rust-native-000000?logo=rust&logoColor=white">
+  <img alt="SQLite WAL" src="https://img.shields.io/badge/SQLite-WAL-003B57?logo=sqlite&logoColor=white">
+</p>
 
----
-
-## ✨ Features
-
-- **Pure Rust Domain Core**: Zero GUI or HTTP network dependencies (`crates/kitt-memory-core`).
-- **SQLite WAL Adapter**: Concurrency-safe SQLite engine with write-locks, busy-timeouts, and monotonic sensitivity preservation on upsert and deduplication (`crates/kitt-memory-sqlite`).
-- **Exact-Content Deduplication**: SHA-256 normalized hash indices prevent active memory row inflation while preserving the most restrictive sensitivity level.
-- **Lexical & Pinned Retrieval**: Recency, frequency, importance, and pinned priorities built into scoring.
-- **Sensitivity & Privacy Egress**: Configurable levels (`public`, `personal`, `private`, `secret`, `ephemeral`) guaranteeing secrets never reach remote providers.
-- **Monotonic Security Guarantee**: Invariant `existing.sensitivity.most_restrictive(incoming)` prevents security downgrades on duplicate merges, imports, or migrations.
-- **Legacy Migration CLI**: Idempotent migration tool to import legacy `kitt-agent-cli` databases without mutating source storage (`apps/kitt-memory-migrate`).
+K.I.T.T. Memory is the shared persistent memory data plane used across the ecosystem. It stores structured memories locally, retrieves them with lexical and priority-aware scoring, deduplicates exact content and preserves privacy sensitivity monotonically across updates and migrations.
 
 ---
 
-## 🏗️ Crates Structure
+## What’s included
+
+- Pure Rust memory-domain core.
+- SQLite WAL storage adapter with busy-timeout and write coordination.
+- Exact-content SHA-256 deduplication.
+- Lexical retrieval with recency, frequency, importance and pinned priority.
+- Workspace and namespace scoping.
+- Sensitivity levels: `public`, `personal`, `private`, `secret`, `ephemeral`.
+- Monotonic sensitivity enforcement on upsert, import and deduplication.
+- TTL/expiry pruning.
+- Migration utility for legacy K.I.T.T. Agent databases.
+
+---
+
+## Quick links
+
+- **K.I.T.T. ecosystem:** https://github.com/rfdetoni/kitt
+- **Agent CLI:** https://github.com/rfdetoni/kitt-agent-cli
+- **Assistant:** https://github.com/rfdetoni/kitt-assistant
+- **Protocol:** https://github.com/rfdetoni/kitt-protocol
+
+---
+
+## Architecture
 
 ```text
 crates/
-├── kitt-memory-core/    # Pure domain abstractions, MemoryStore trait, scoring
-└── kitt-memory-sqlite/  # SQLite WAL implementation, indexing, queries
+├── kitt-memory-core/     domain types, MemoryStore trait, ranking rules
+└── kitt-memory-sqlite/   SQLite WAL implementation, indexes and queries
+
 apps/
-└── kitt-memory-migrate/ # Standalone migration binary
+└── kitt-memory-migrate/  idempotent legacy migration utility
 ```
+
+The domain core remains independent of GUI and HTTP concerns. Storage-specific behavior is isolated behind the memory-store abstraction.
 
 ---
 
-## 🚀 Quick Start
+## Memory model
 
-### Library Usage
+A memory carries more than text. Retrieval and egress decisions can use its namespace, workspace scope, kind, importance, confidence, pinned status, expiry and sensitivity.
+
+The key privacy invariant is monotonic sensitivity:
+
+```text
+result = most_restrictive(existing.sensitivity, incoming.sensitivity)
+```
+
+A duplicate merge, migration or later update therefore cannot silently downgrade a memory from `secret` to `private` or from `private` to `public`.
+
+---
+
+## Library usage
 
 ```rust
-use kitt_memory_core::{MemoryKind, MemoryScope, MemoryStore, NewMemory, RecallQuery, Sensitivity};
+use kitt_memory_core::{
+    MemoryKind,
+    MemoryScope,
+    MemoryStore,
+    NewMemory,
+    RecallQuery,
+    Sensitivity,
+};
 use kitt_memory_sqlite::SqliteMemoryStore;
 
 let store = SqliteMemoryStore::open("~/.config/kitt/assistant/memory.db")?;
 
-// Store memory
-let mem = store.remember(NewMemory {
+store.remember(NewMemory {
     namespace: "agent-cli".into(),
     workspace_id: "my-project".into(),
     kind: MemoryKind::ProjectRule,
@@ -55,7 +96,6 @@ let mem = store.remember(NewMemory {
     metadata_json: "{}".into(),
 })?;
 
-// Recall memory
 let results = store.recall(&RecallQuery {
     namespace: "agent-cli".into(),
     workspace_id: "my-project".into(),
@@ -66,15 +106,47 @@ let results = store.recall(&RecallQuery {
 })?;
 ```
 
-### Migration Tool
+---
+
+## Migration
+
+Import a legacy Agent database without mutating the source:
 
 ```bash
-cargo run -p kitt-memory-migrate -- /path/to/legacy_agent_history.db ~/.config/kitt/assistant/memory.db
+cargo run -p kitt-memory-migrate -- \
+  /path/to/legacy_agent_history.db \
+  ~/.config/kitt/assistant/memory.db
 ```
+
+Migration is intended to be idempotent and uses the same deduplication and sensitivity invariants as normal writes.
 
 ---
 
-## 🧪 Testing & Linting
+## Performance model
+
+The engine is optimized for a local, persistent workload rather than an external vector-database dependency:
+
+- WAL supports concurrent readers while writes remain coordinated.
+- Exact hashes prevent duplicate-row inflation.
+- Local indexes keep retrieval predictable.
+- Ranking is performed on bounded candidate sets rather than sending the whole memory store to a model.
+- Expired rows can be pruned instead of remaining permanent context baggage.
+
+This keeps memory useful to the Agent without making memory retrieval itself a network dependency.
+
+---
+
+## Security & privacy
+
+Memory sensitivity is part of the data model, not a presentation hint. Callers can explicitly disallow private or secret records from retrieval paths that may leave the machine.
+
+Important guarantees include monotonic sensitivity, local SQLite storage, workspace/namespace scoping and non-destructive legacy migration.
+
+The consuming component is still responsible for applying its own egress and authorization policy before sending recalled content to remote providers.
+
+---
+
+## Testing & linting
 
 ```bash
 cargo fmt --all -- --check
@@ -84,6 +156,26 @@ cargo test --all
 
 ---
 
-## 📄 License
+## Contributing
 
-MIT License. See [LICENSE](LICENSE).
+Memory changes should preserve deterministic ranking behavior, migration idempotency and the monotonic sensitivity invariant. Avoid features that require a heavyweight resident service when the same behavior can remain local and bounded.
+
+---
+
+## K.I.T.T. ecosystem
+
+| Repository | Responsibility |
+| --- | --- |
+| [`kitt`](https://github.com/rfdetoni/kitt) | installer and ecosystem composition |
+| [`kitt-agent-cli`](https://github.com/rfdetoni/kitt-agent-cli) | autonomous agent control plane |
+| [`kitt-reverse-proxy`](https://github.com/rfdetoni/kitt-reverse-proxy) | authorized provider gateway |
+| [`kitt-protocol`](https://github.com/rfdetoni/kitt-protocol) | shared contracts and SDKs |
+| [`kitt-toolbox`](https://github.com/rfdetoni/kitt-toolbox) | native code/system data plane |
+| [`kitt-ai-workers`](https://github.com/rfdetoni/kitt-ai-workers) | isolated AI/ML workers and evals |
+| [`kitt-assistant`](https://github.com/rfdetoni/kitt-assistant) | resident assistant and Control Center |
+
+---
+
+## License
+
+MIT. See [LICENSE](LICENSE).
