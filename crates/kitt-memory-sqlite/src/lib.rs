@@ -74,6 +74,9 @@ impl SqliteMemoryStore {
             write_lock: Mutex::new(()),
         };
         store.with_conn(migrate)?;
+        // Keep expired rows out of the hot read path without turning every
+        // recall into a write transaction.
+        store.prune_expired()?;
         Ok(store)
     }
 
@@ -210,17 +213,20 @@ impl MemoryStore for SqliteMemoryStore {
     }
 
     fn recall(&self, q: &RecallQuery) -> Result<Vec<MemoryRecord>> {
-        self.prune_expired()?;
+        let now = now_epoch();
         let mut candidates = self.with_conn(|conn| {
-            let mut stmt = conn.prepare("SELECT id FROM memories WHERE namespace=?1 AND (workspace_id=?2 OR scope='global') AND status='ACTIVE' ORDER BY pinned DESC,importance DESC,updated_at DESC LIMIT 128")?;
-            let ids = stmt.query_map(params![q.namespace,q.workspace_id],
-                |r| r.get::<_,String>(0))?
-                .collect::<std::result::Result<Vec<_>,_>>()?;
-            let mut out=Vec::with_capacity(ids.len());
-            for id in ids {
-                if let Some(m)=load_one(conn,&id)? { out.push(m); }
-            }
-            Ok(out)
+            let mut stmt = conn.prepare(
+                "SELECT id,namespace,workspace_id,kind,content,normalized_content,status,sensitivity,scope,importance,confidence,created_at,updated_at,last_accessed_at,access_count,valid_until,supersedes_id,content_hash,pinned,metadata_json
+                 FROM memories
+                 WHERE namespace=?1
+                   AND (workspace_id=?2 OR scope='global')
+                   AND status='ACTIVE'
+                   AND (valid_until IS NULL OR valid_until > ?3)
+                 ORDER BY pinned DESC,importance DESC,updated_at DESC
+                 LIMIT 128",
+            )?;
+            stmt.query_map(params![q.namespace, q.workspace_id, now], map_memory_row)?
+                .collect::<std::result::Result<Vec<_>, _>>()
         })?;
         candidates.retain(|m| match m.sensitivity {
             Sensitivity::Secret => q.allow_secret,
@@ -228,7 +234,6 @@ impl MemoryStore for SqliteMemoryStore {
             Sensitivity::Ephemeral => false,
             _ => true,
         });
-        let now = now_epoch();
         candidates.sort_by(|a, b| {
             lexical_score(&q.text, b, now)
                 .partial_cmp(&lexical_score(&q.text, a, now))
@@ -242,10 +247,12 @@ impl MemoryStore for SqliteMemoryStore {
                 .lock()
                 .map_err(|_| MemoryError::Storage("memory write lock poisoned".into()))?;
             self.with_conn(|conn| {
-                let tx=conn.unchecked_transaction()?;
+                let tx = conn.unchecked_transaction()?;
                 for id in &ids {
-                    tx.execute("UPDATE memories SET last_accessed_at=?1,access_count=access_count+1 WHERE id=?2",
-                        params![now,id])?;
+                    tx.execute(
+                        "UPDATE memories SET last_accessed_at=?1,access_count=access_count+1 WHERE id=?2",
+                        params![now, id],
+                    )?;
                 }
                 tx.commit()?;
                 Ok(())
@@ -294,24 +301,51 @@ impl MemoryStore for SqliteMemoryStore {
     }
 
     fn consolidate_exact_duplicates(&self, namespace: &str, workspace_id: &str) -> Result<usize> {
-        let rows=self.with_conn(|conn|{
-            let mut stmt=conn.prepare("SELECT content_hash,id,pinned,importance,updated_at FROM memories WHERE namespace=?1 AND workspace_id=?2 AND status='ACTIVE' ORDER BY pinned DESC,importance DESC,updated_at DESC")?;
-            stmt.query_map(params![namespace,workspace_id],
-                |r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
-                .collect::<std::result::Result<Vec<_>,_>>()
+        let rows = self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT content_hash,id,pinned,importance,updated_at
+                 FROM memories
+                 WHERE namespace=?1 AND workspace_id=?2 AND status='ACTIVE'
+                 ORDER BY pinned DESC,importance DESC,updated_at DESC",
+            )?;
+            stmt.query_map(params![namespace, workspace_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
         })?;
+
         let mut keeper: HashMap<String, String> = HashMap::new();
-        let mut changed = 0;
+        let mut superseded = Vec::new();
         for (hash, id) in rows {
             if let Some(keep) = keeper.get(&hash) {
-                if self.set_status(&id, MemoryStatus::Superseded, Some(keep))? {
-                    changed += 1;
-                }
+                superseded.push((id, keep.clone()));
             } else {
                 keeper.insert(hash, id);
             }
         }
-        Ok(changed)
+        if superseded.is_empty() {
+            return Ok(0);
+        }
+
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| MemoryError::Storage("memory write lock poisoned".into()))?;
+        let updated_at = now_epoch();
+        self.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let mut changed = 0;
+            for (id, keep) in &superseded {
+                changed += tx.execute(
+                    "UPDATE memories
+                     SET status='SUPERSEDED',supersedes_id=?1,updated_at=?2
+                     WHERE id=?3 AND status='ACTIVE'",
+                    params![keep, updated_at, id],
+                )?;
+            }
+            tx.commit()?;
+            Ok(changed)
+        })
     }
 }
 
@@ -331,6 +365,31 @@ fn insert_record(
         params![m.id,m.namespace,m.workspace_id,m.kind.as_db(),m.content,m.normalized_content,m.status.as_db(),m.sensitivity.as_db(),m.scope.as_db(),m.importance,m.confidence,m.created_at,m.updated_at,m.last_accessed_at,m.access_count as i64,m.valid_until,m.supersedes_id,m.content_hash,m.pinned as i64,m.metadata_json])
 }
 
+fn map_memory_row(r: &rusqlite::Row<'_>) -> std::result::Result<MemoryRecord, rusqlite::Error> {
+    Ok(MemoryRecord {
+        id: r.get(0)?,
+        namespace: r.get(1)?,
+        workspace_id: r.get(2)?,
+        kind: MemoryKind::from_db(&r.get::<_, String>(3)?),
+        content: r.get(4)?,
+        normalized_content: r.get(5)?,
+        status: MemoryStatus::from_db(&r.get::<_, String>(6)?),
+        sensitivity: Sensitivity::from_db(&r.get::<_, String>(7)?),
+        scope: MemoryScope::from_db(&r.get::<_, String>(8)?),
+        importance: r.get::<_, f64>(9)? as f32,
+        confidence: r.get::<_, f64>(10)? as f32,
+        created_at: r.get(11)?,
+        updated_at: r.get(12)?,
+        last_accessed_at: r.get(13)?,
+        access_count: r.get::<_, i64>(14)? as u64,
+        valid_until: r.get(15)?,
+        supersedes_id: r.get(16)?,
+        content_hash: r.get(17)?,
+        pinned: r.get::<_, i64>(18)? != 0,
+        metadata_json: r.get(19)?,
+    })
+}
+
 fn load_one(
     conn: &Connection,
     id: &str,
@@ -338,20 +397,9 @@ fn load_one(
     conn.query_row(
         "SELECT id,namespace,workspace_id,kind,content,normalized_content,status,sensitivity,scope,importance,confidence,created_at,updated_at,last_accessed_at,access_count,valid_until,supersedes_id,content_hash,pinned,metadata_json FROM memories WHERE id=?1",
         [id],
-        |r|Ok(MemoryRecord{
-            id:r.get(0)?,namespace:r.get(1)?,workspace_id:r.get(2)?,
-            kind:MemoryKind::from_db(&r.get::<_,String>(3)?),content:r.get(4)?,
-            normalized_content:r.get(5)?,
-            status:MemoryStatus::from_db(&r.get::<_,String>(6)?),
-            sensitivity:Sensitivity::from_db(&r.get::<_,String>(7)?),
-            scope:MemoryScope::from_db(&r.get::<_,String>(8)?),
-            importance:r.get::<_,f64>(9)? as f32,confidence:r.get::<_,f64>(10)? as f32,
-            created_at:r.get(11)?,updated_at:r.get(12)?,last_accessed_at:r.get(13)?,
-            access_count:r.get::<_,i64>(14)? as u64,valid_until:r.get(15)?,
-            supersedes_id:r.get(16)?,content_hash:r.get(17)?,
-            pinned:r.get::<_,i64>(18)?!=0,metadata_json:r.get(19)?
-        })
-    ).optional()
+        map_memory_row,
+    )
+    .optional()
 }
 
 fn migrate(conn: &Connection) -> std::result::Result<(), rusqlite::Error> {
