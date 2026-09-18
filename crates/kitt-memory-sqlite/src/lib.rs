@@ -365,9 +365,7 @@ fn insert_record(
         params![m.id,m.namespace,m.workspace_id,m.kind.as_db(),m.content,m.normalized_content,m.status.as_db(),m.sensitivity.as_db(),m.scope.as_db(),m.importance,m.confidence,m.created_at,m.updated_at,m.last_accessed_at,m.access_count as i64,m.valid_until,m.supersedes_id,m.content_hash,m.pinned as i64,m.metadata_json])
 }
 
-fn map_memory_row(
-    r: &rusqlite::Row<'_>,
-) -> std::result::Result<MemoryRecord, rusqlite::Error> {
+fn map_memory_row(r: &rusqlite::Row<'_>) -> std::result::Result<MemoryRecord, rusqlite::Error> {
     Ok(MemoryRecord {
         id: r.get(0)?,
         namespace: r.get(1)?,
