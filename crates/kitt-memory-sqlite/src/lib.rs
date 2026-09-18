@@ -301,24 +301,51 @@ impl MemoryStore for SqliteMemoryStore {
     }
 
     fn consolidate_exact_duplicates(&self, namespace: &str, workspace_id: &str) -> Result<usize> {
-        let rows=self.with_conn(|conn|{
-            let mut stmt=conn.prepare("SELECT content_hash,id,pinned,importance,updated_at FROM memories WHERE namespace=?1 AND workspace_id=?2 AND status='ACTIVE' ORDER BY pinned DESC,importance DESC,updated_at DESC")?;
-            stmt.query_map(params![namespace,workspace_id],
-                |r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
-                .collect::<std::result::Result<Vec<_>,_>>()
+        let rows = self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT content_hash,id,pinned,importance,updated_at
+                 FROM memories
+                 WHERE namespace=?1 AND workspace_id=?2 AND status='ACTIVE'
+                 ORDER BY pinned DESC,importance DESC,updated_at DESC",
+            )?;
+            stmt.query_map(params![namespace, workspace_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
         })?;
+
         let mut keeper: HashMap<String, String> = HashMap::new();
-        let mut changed = 0;
+        let mut superseded = Vec::new();
         for (hash, id) in rows {
             if let Some(keep) = keeper.get(&hash) {
-                if self.set_status(&id, MemoryStatus::Superseded, Some(keep))? {
-                    changed += 1;
-                }
+                superseded.push((id, keep.clone()));
             } else {
                 keeper.insert(hash, id);
             }
         }
-        Ok(changed)
+        if superseded.is_empty() {
+            return Ok(0);
+        }
+
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| MemoryError::Storage("memory write lock poisoned".into()))?;
+        let updated_at = now_epoch();
+        self.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let mut changed = 0;
+            for (id, keep) in &superseded {
+                changed += tx.execute(
+                    "UPDATE memories
+                     SET status='SUPERSEDED',supersedes_id=?1,updated_at=?2
+                     WHERE id=?3 AND status='ACTIVE'",
+                    params![keep, updated_at, id],
+                )?;
+            }
+            tx.commit()?;
+            Ok(changed)
+        })
     }
 }
 
