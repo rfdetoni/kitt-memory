@@ -229,9 +229,9 @@ impl NewMemory {
             updated_at: now,
             last_accessed_at: None,
             access_count: 0,
-            valid_until: self.ttl_seconds.map(|ttl| {
-                now.saturating_add(i64::try_from(ttl).unwrap_or(i64::MAX))
-            }),
+            valid_until: self
+                .ttl_seconds
+                .map(|ttl| now.saturating_add(i64::try_from(ttl).unwrap_or(i64::MAX))),
             supersedes_id: None,
             content_hash: hash_normalized(&normalized),
             pinned: self.pinned,
@@ -303,11 +303,7 @@ pub fn lexical_terms(query: &str) -> HashSet<String> {
         .collect()
 }
 
-pub fn lexical_score_with_terms(
-    terms: &HashSet<String>,
-    memory: &MemoryRecord,
-    now: i64,
-) -> f32 {
+pub fn lexical_score_with_terms(terms: &HashSet<String>, memory: &MemoryRecord, now: i64) -> f32 {
     let words: HashSet<_> = memory
         .normalized_content
         .split_whitespace()
