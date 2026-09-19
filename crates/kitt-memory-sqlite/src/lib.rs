@@ -1,6 +1,6 @@
 use kitt_memory_core::{
     MemoryError, MemoryKind, MemoryRecord, MemoryScope, MemoryStatus, MemoryStore, NewMemory,
-    RecallQuery, Result, Sensitivity, lexical_score, now_epoch,
+    RecallQuery, Result, Sensitivity, lexical_score_with_terms, lexical_terms, now_epoch,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::{
@@ -234,11 +234,23 @@ impl MemoryStore for SqliteMemoryStore {
             Sensitivity::Ephemeral => false,
             _ => true,
         });
-        candidates.sort_by(|a, b| {
-            lexical_score(&q.text, b, now)
-                .partial_cmp(&lexical_score(&q.text, a, now))
+        let query_terms = lexical_terms(&q.text);
+        let mut scored = candidates
+            .into_iter()
+            .map(|memory| {
+                let score = lexical_score_with_terms(&query_terms, &memory, now);
+                (memory, score)
+            })
+            .collect::<Vec<_>>();
+        scored.sort_by(|(_, left), (_, right)| {
+            right
+                .partial_cmp(left)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+        let mut candidates = scored
+            .into_iter()
+            .map(|(memory, _)| memory)
+            .collect::<Vec<_>>();
         candidates.truncate(q.limit.clamp(1, 50));
         if !candidates.is_empty() {
             let ids: Vec<_> = candidates.iter().map(|m| m.id.clone()).collect();

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use uuid::Uuid;
@@ -228,7 +229,9 @@ impl NewMemory {
             updated_at: now,
             last_accessed_at: None,
             access_count: 0,
-            valid_until: self.ttl_seconds.map(|ttl| now.saturating_add(ttl as i64)),
+            valid_until: self.ttl_seconds.map(|ttl| {
+                now.saturating_add(i64::try_from(ttl).unwrap_or(i64::MAX))
+            }),
             supersedes_id: None,
             content_hash: hash_normalized(&normalized),
             pinned: self.pinned,
@@ -293,12 +296,19 @@ pub fn now_epoch() -> i64 {
         .unwrap_or_default()
         .as_secs() as i64
 }
-pub fn lexical_score(query: &str, memory: &MemoryRecord, now: i64) -> f32 {
-    let terms: std::collections::HashSet<_> = normalize(query)
+pub fn lexical_terms(query: &str) -> HashSet<String> {
+    normalize(query)
         .split_whitespace()
         .map(str::to_owned)
-        .collect();
-    let words: std::collections::HashSet<_> = memory
+        .collect()
+}
+
+pub fn lexical_score_with_terms(
+    terms: &HashSet<String>,
+    memory: &MemoryRecord,
+    now: i64,
+) -> f32 {
+    let words: HashSet<_> = memory
         .normalized_content
         .split_whitespace()
         .map(str::to_owned)
@@ -311,6 +321,11 @@ pub fn lexical_score(query: &str, memory: &MemoryRecord, now: i64) -> f32 {
         + memory.confidence
         + recency
         + if memory.pinned { 3.0 } else { 0.0 }
+}
+
+pub fn lexical_score(query: &str, memory: &MemoryRecord, now: i64) -> f32 {
+    let terms = lexical_terms(query);
+    lexical_score_with_terms(&terms, memory, now)
 }
 
 #[cfg(test)]
@@ -330,6 +345,26 @@ mod tests {
     fn normalization_is_stable() {
         assert_eq!("hello world", normalize("  Hello   WORLD "));
     }
+    #[test]
+    fn huge_ttl_saturates_instead_of_wrapping() {
+        let record = NewMemory {
+            namespace: "test".into(),
+            workspace_id: "workspace".into(),
+            kind: MemoryKind::TechnicalFact,
+            content: "fact".into(),
+            sensitivity: Sensitivity::Private,
+            scope: MemoryScope::Workspace,
+            importance: 0.8,
+            confidence: 1.0,
+            pinned: false,
+            ttl_seconds: Some(u64::MAX),
+            metadata_json: "{}".into(),
+        }
+        .into_record()
+        .unwrap();
+        assert_eq!(record.valid_until, Some(i64::MAX));
+    }
+
     #[test]
     fn sensitivity_is_monotonic() {
         assert_eq!(
