@@ -243,9 +243,7 @@ impl MemoryStore for SqliteMemoryStore {
             })
             .collect::<Vec<_>>();
         scored.sort_by(|(_, left), (_, right)| {
-            right
-                .partial_cmp(left)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            right.partial_cmp(left).unwrap_or(std::cmp::Ordering::Equal)
         });
         let mut candidates = scored
             .into_iter()
