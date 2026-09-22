@@ -278,7 +278,10 @@ impl MemoryStore for SqliteMemoryStore {
 
     fn forget(&self, id: &str) -> Result<bool> {
         let conn = self.writer_conn()?;
-        Ok(conn.execute("DELETE FROM memories WHERE id=?1", [id]).map_err(storage)? > 0)
+        Ok(conn
+            .execute("DELETE FROM memories WHERE id=?1", [id])
+            .map_err(storage)?
+            > 0)
     }
 
     fn set_status(
@@ -288,10 +291,13 @@ impl MemoryStore for SqliteMemoryStore {
         supersedes_id: Option<&str>,
     ) -> Result<bool> {
         let conn = self.writer_conn()?;
-        Ok(conn.execute(
-            "UPDATE memories SET status=?1,supersedes_id=?2,updated_at=?3 WHERE id=?4",
-            params![status.as_db(), supersedes_id, now_epoch(), id],
-        ).map_err(storage)? > 0)
+        Ok(conn
+            .execute(
+                "UPDATE memories SET status=?1,supersedes_id=?2,updated_at=?3 WHERE id=?4",
+                params![status.as_db(), supersedes_id, now_epoch(), id],
+            )
+            .map_err(storage)?
+            > 0)
     }
 
     fn prune_expired(&self) -> Result<usize> {
@@ -299,7 +305,8 @@ impl MemoryStore for SqliteMemoryStore {
         conn.execute(
             "DELETE FROM memories WHERE valid_until IS NOT NULL AND valid_until <= ?1",
             [now_epoch()],
-        ).map_err(storage)
+        )
+        .map_err(storage)
     }
 
     fn consolidate_exact_duplicates(&self, namespace: &str, workspace_id: &str) -> Result<usize> {
@@ -335,12 +342,14 @@ impl MemoryStore for SqliteMemoryStore {
             let tx = conn.unchecked_transaction().map_err(storage)?;
             let mut changed = 0;
             for (id, keep) in &superseded {
-                changed += tx.execute(
-                    "UPDATE memories
-                     SET status='SUPERSEDED',supersedes_id=?1,updated_at=?2
-                     WHERE id=?3 AND status='ACTIVE'",
-                    params![keep, updated_at, id],
-                )?;
+                changed += tx
+                    .execute(
+                        "UPDATE memories
+                         SET status='SUPERSEDED',supersedes_id=?1,updated_at=?2
+                         WHERE id=?3 AND status='ACTIVE'",
+                        params![keep, updated_at, id],
+                    )
+                    .map_err(storage)?;
             }
             tx.commit().map_err(storage)?;
             Ok(changed)
