@@ -76,7 +76,7 @@ impl SqliteMemoryStore {
         };
         {
             let conn = store.writer_conn()?;
-            migrate(&conn)?;
+            migrate(&conn).map_err(storage)?;
         }
         // Keep expired rows out of the hot read path without turning every
         // recall into a write transaction.
