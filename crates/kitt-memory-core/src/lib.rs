@@ -304,12 +304,18 @@ pub fn lexical_terms(query: &str) -> HashSet<String> {
 }
 
 pub fn lexical_score_with_terms(terms: &HashSet<String>, memory: &MemoryRecord, now: i64) -> f32 {
-    let words: HashSet<_> = memory
-        .normalized_content
-        .split_whitespace()
-        .map(str::to_owned)
-        .collect();
-    let overlap = terms.intersection(&words).count() as f32;
+    // Query term sets are tiny in normal recall traffic. Re-scan the borrowed
+    // normalized string instead of allocating a second HashSet for every
+    // candidate memory.
+    let overlap = terms
+        .iter()
+        .filter(|term| {
+            memory
+                .normalized_content
+                .split_whitespace()
+                .any(|word| word == term.as_str())
+        })
+        .count() as f32;
     let age_days = ((now - memory.updated_at).max(0) as f32) / 86_400.0;
     let recency = 1.0 / (1.0 + age_days / 30.0);
     overlap * 1.5
