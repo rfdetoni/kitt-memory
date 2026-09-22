@@ -59,7 +59,7 @@ fn open_legacy_read_only(path: &Path) -> Result<Connection> {
 
 pub struct SqliteMemoryStore {
     path: PathBuf,
-    write_lock: Mutex<()>,
+    writer: Mutex<Connection>,
 }
 
 impl SqliteMemoryStore {
@@ -69,23 +69,37 @@ impl SqliteMemoryStore {
             std::fs::create_dir_all(parent).map_err(storage)?;
         }
         ensure_private_database_file(&path)?;
+        let writer = Self::open_connection(&path)?;
         let store = Self {
             path,
-            write_lock: Mutex::new(()),
+            writer: Mutex::new(writer),
         };
-        store.with_conn(migrate)?;
+        {
+            let conn = store.writer_conn()?;
+            migrate(&conn)?;
+        }
         // Keep expired rows out of the hot read path without turning every
         // recall into a write transaction.
         store.prune_expired()?;
         Ok(store)
     }
 
-    fn conn(&self) -> Result<Connection> {
-        let conn = Connection::open(&self.path).map_err(storage)?;
+    fn open_connection(path: &Path) -> Result<Connection> {
+        let conn = Connection::open(path).map_err(storage)?;
         conn.busy_timeout(Duration::from_secs(5)).map_err(storage)?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(storage)?;
         Ok(conn)
+    }
+
+    fn conn(&self) -> Result<Connection> {
+        Self::open_connection(&self.path)
+    }
+
+    fn writer_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+        self.writer
+            .lock()
+            .map_err(|_| MemoryError::Storage("memory writer lock poisoned".into()))
     }
 
     fn with_conn<T>(
@@ -151,11 +165,7 @@ impl MemoryStore for SqliteMemoryStore {
             return memory.into_record();
         }
         let record = memory.into_record()?;
-        let _guard = self
-            .write_lock
-            .lock()
-            .map_err(|_| MemoryError::Storage("memory write lock poisoned".into()))?;
-        let conn = self.conn()?;
+        let conn = self.writer_conn()?;
         let tx = conn.unchecked_transaction().map_err(storage)?;
 
         let existing_id = tx.query_row(
@@ -193,13 +203,10 @@ impl MemoryStore for SqliteMemoryStore {
     }
 
     fn upsert_record(&self, m: &MemoryRecord) -> Result<()> {
-        let _guard = self
-            .write_lock
-            .lock()
-            .map_err(|_| MemoryError::Storage("memory write lock poisoned".into()))?;
-        self.with_conn(|conn| {
+        let conn = self.writer_conn()?;
+        {
             let mut merged = m.clone();
-            if let Some(existing) = load_one(conn, &m.id)? {
+            if let Some(existing) = load_one(&conn, &m.id).map_err(storage)? {
                 // Sensitivity is a monotonic security property. Import/migrate
                 // paths must never make an already stored record less strict.
                 merged.sensitivity = existing.sensitivity.most_restrictive(m.sensitivity);
@@ -207,8 +214,8 @@ impl MemoryStore for SqliteMemoryStore {
             conn.execute(
                 "INSERT INTO memories(id,namespace,workspace_id,kind,content,normalized_content,status,sensitivity,scope,importance,confidence,created_at,updated_at,last_accessed_at,access_count,valid_until,supersedes_id,content_hash,pinned,metadata_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20) ON CONFLICT(id) DO UPDATE SET namespace=excluded.namespace,workspace_id=excluded.workspace_id,kind=excluded.kind,content=excluded.content,normalized_content=excluded.normalized_content,status=excluded.status,sensitivity=excluded.sensitivity,scope=excluded.scope,importance=excluded.importance,confidence=excluded.confidence,updated_at=excluded.updated_at,last_accessed_at=excluded.last_accessed_at,access_count=excluded.access_count,valid_until=excluded.valid_until,supersedes_id=excluded.supersedes_id,content_hash=excluded.content_hash,pinned=excluded.pinned,metadata_json=excluded.metadata_json",
                 params![merged.id,merged.namespace,merged.workspace_id,merged.kind.as_db(),merged.content,merged.normalized_content,merged.status.as_db(),merged.sensitivity.as_db(),merged.scope.as_db(),merged.importance,merged.confidence,merged.created_at,merged.updated_at,merged.last_accessed_at,merged.access_count as i64,merged.valid_until,merged.supersedes_id,merged.content_hash,merged.pinned as i64,merged.metadata_json]
-            )
-        })?;
+            ).map_err(storage)?;
+        }
         Ok(())
     }
 
@@ -252,31 +259,26 @@ impl MemoryStore for SqliteMemoryStore {
         candidates.truncate(q.limit.clamp(1, 50));
         if !candidates.is_empty() {
             let ids: Vec<_> = candidates.iter().map(|m| m.id.clone()).collect();
-            let _guard = self
-                .write_lock
-                .lock()
-                .map_err(|_| MemoryError::Storage("memory write lock poisoned".into()))?;
-            self.with_conn(|conn| {
-                let tx = conn.unchecked_transaction()?;
-                for id in &ids {
-                    tx.execute(
-                        "UPDATE memories SET last_accessed_at=?1,access_count=access_count+1 WHERE id=?2",
-                        params![now, id],
-                    )?;
-                }
-                tx.commit()?;
-                Ok(())
-            })?;
+            let conn = self.writer_conn()?;
+            let placeholders = (0..ids.len())
+                .map(|idx| format!("?{}", idx + 2))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "UPDATE memories SET last_accessed_at=?1,access_count=access_count+1 WHERE id IN ({placeholders})"
+            );
+            let mut values = Vec::<rusqlite::types::Value>::with_capacity(ids.len() + 1);
+            values.push(now.into());
+            values.extend(ids.into_iter().map(rusqlite::types::Value::from));
+            conn.execute(&sql, rusqlite::params_from_iter(values))
+                .map_err(storage)?;
         }
         Ok(candidates)
     }
 
     fn forget(&self, id: &str) -> Result<bool> {
-        let _guard = self
-            .write_lock
-            .lock()
-            .map_err(|_| MemoryError::Storage("memory write lock poisoned".into()))?;
-        Ok(self.with_conn(|c| c.execute("DELETE FROM memories WHERE id=?1", [id]))? > 0)
+        let conn = self.writer_conn()?;
+        Ok(conn.execute("DELETE FROM memories WHERE id=?1", [id]).map_err(storage)? > 0)
     }
 
     fn set_status(
@@ -285,29 +287,19 @@ impl MemoryStore for SqliteMemoryStore {
         status: MemoryStatus,
         supersedes_id: Option<&str>,
     ) -> Result<bool> {
-        let _guard = self
-            .write_lock
-            .lock()
-            .map_err(|_| MemoryError::Storage("memory write lock poisoned".into()))?;
-        Ok(self.with_conn(|c| {
-            c.execute(
-                "UPDATE memories SET status=?1,supersedes_id=?2,updated_at=?3 WHERE id=?4",
-                params![status.as_db(), supersedes_id, now_epoch(), id],
-            )
-        })? > 0)
+        let conn = self.writer_conn()?;
+        Ok(conn.execute(
+            "UPDATE memories SET status=?1,supersedes_id=?2,updated_at=?3 WHERE id=?4",
+            params![status.as_db(), supersedes_id, now_epoch(), id],
+        ).map_err(storage)? > 0)
     }
 
     fn prune_expired(&self) -> Result<usize> {
-        let _guard = self
-            .write_lock
-            .lock()
-            .map_err(|_| MemoryError::Storage("memory write lock poisoned".into()))?;
-        self.with_conn(|c| {
-            c.execute(
-                "DELETE FROM memories WHERE valid_until IS NOT NULL AND valid_until <= ?1",
-                [now_epoch()],
-            )
-        })
+        let conn = self.writer_conn()?;
+        conn.execute(
+            "DELETE FROM memories WHERE valid_until IS NOT NULL AND valid_until <= ?1",
+            [now_epoch()],
+        ).map_err(storage)
     }
 
     fn consolidate_exact_duplicates(&self, namespace: &str, workspace_id: &str) -> Result<usize> {
@@ -337,13 +329,10 @@ impl MemoryStore for SqliteMemoryStore {
             return Ok(0);
         }
 
-        let _guard = self
-            .write_lock
-            .lock()
-            .map_err(|_| MemoryError::Storage("memory write lock poisoned".into()))?;
+        let conn = self.writer_conn()?;
         let updated_at = now_epoch();
-        self.with_conn(|conn| {
-            let tx = conn.unchecked_transaction()?;
+        {
+            let tx = conn.unchecked_transaction().map_err(storage)?;
             let mut changed = 0;
             for (id, keep) in &superseded {
                 changed += tx.execute(
@@ -353,9 +342,9 @@ impl MemoryStore for SqliteMemoryStore {
                     params![keep, updated_at, id],
                 )?;
             }
-            tx.commit()?;
+            tx.commit().map_err(storage)?;
             Ok(changed)
-        })
+        }
     }
 }
 
