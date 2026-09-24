@@ -182,7 +182,7 @@ impl SqliteMemoryStore {
                 let mut stmt = conn.prepare(&sql)?;
                 stmt.query_map(
                     params![fts, query.namespace, query.workspace_id, now, cap as i64],
-                    |row| Ok((map_memory_row(row)?, row.get::<_, f64>(20)?)),
+                    |row| Ok((map_memory_row(row)?, row.get::<_, f64>(20)? as f32)),
                 )?
                 .collect::<std::result::Result<Vec<_>, _>>()
             })?
@@ -825,7 +825,7 @@ fn fts_query(input: &str) -> String {
         .map(str::trim)
         .filter(|term| term.chars().count() >= 2)
         .take(16)
-        .map(|term| format!(""{}"", term.replace('"', "")))
+        .map(|term| format!("\"{}\"", term.replace('"', "")))
         .collect::<Vec<_>>();
     terms.sort();
     terms.dedup();
