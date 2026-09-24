@@ -160,7 +160,7 @@ pub fn assess_merge_candidate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MemoryScope, MemoryStatus, Sensitivity};
+    use crate::{MemoryKind, MemoryScope, MemoryStatus, Sensitivity};
 
     fn record(content: &str) -> MemoryRecord {
         MemoryRecord {
