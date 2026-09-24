@@ -1,9 +1,9 @@
 use kitt_memory_core::{
     BaselineQuery, CorrectionRecord, KnowledgeEdge, KnowledgeRelation, KnowledgeStore,
-    MemoryBaseline, MemoryError, MemoryKind, MemoryRecord, MemoryScope, MemoryStatus,
-    MemoryStore, MergeCandidate, MergeDisposition, NewConcept, NewCorrection, NewMemory,
-    RecallQuery, Result, SemanticReranker, Sensitivity, StoredConcept,
-    assess_merge_candidate, build_memory_baseline, now_epoch,
+    MemoryBaseline, MemoryError, MemoryKind, MemoryRecord, MemoryScope, MemoryStatus, MemoryStore,
+    MergeCandidate, MergeDisposition, NewConcept, NewCorrection, NewMemory, RecallQuery, Result,
+    SemanticReranker, Sensitivity, StoredConcept, assess_merge_candidate, build_memory_baseline,
+    now_epoch,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::{
@@ -18,8 +18,7 @@ use std::{
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 const STORE_SCHEMA_VERSION: i64 = 2;
-const MEMORY_COLUMNS: &str =
-    "m.id,m.namespace,m.workspace_id,m.kind,m.content,m.normalized_content,m.status,m.sensitivity,m.scope,m.importance,m.confidence,m.created_at,m.updated_at,m.last_accessed_at,m.access_count,m.valid_until,m.supersedes_id,m.content_hash,m.pinned,m.metadata_json";
+const MEMORY_COLUMNS: &str = "m.id,m.namespace,m.workspace_id,m.kind,m.content,m.normalized_content,m.status,m.sensitivity,m.scope,m.importance,m.confidence,m.created_at,m.updated_at,m.last_accessed_at,m.access_count,m.valid_until,m.supersedes_id,m.content_hash,m.pinned,m.metadata_json";
 
 fn ensure_private_database_file(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
@@ -254,10 +253,7 @@ impl SqliteMemoryStore {
                 let retrieval_position = 1.0 / (1.0 + (index as f32 * 0.12));
                 let semantic = semantic_scores.get(&memory.id).copied().unwrap_or(0.0);
                 let score = if semantic_enabled {
-                    lexical * 0.30
-                        + semantic * 0.35
-                        + retained * 0.20
-                        + retrieval_position * 0.15
+                    lexical * 0.30 + semantic * 0.35 + retained * 0.20 + retrieval_position * 0.15
                 } else {
                     lexical * 0.48 + retained * 0.32 + retrieval_position * 0.20
                 };
@@ -716,10 +712,14 @@ impl KnowledgeStore for SqliteMemoryStore {
         weight: f32,
     ) -> Result<KnowledgeEdge> {
         if source_id == target_id {
-            return Err(MemoryError::Invalid("a concept cannot link to itself".into()));
+            return Err(MemoryError::Invalid(
+                "a concept cannot link to itself".into(),
+            ));
         }
         if !weight.is_finite() {
-            return Err(MemoryError::Invalid("knowledge link weight must be finite".into()));
+            return Err(MemoryError::Invalid(
+                "knowledge link weight must be finite".into(),
+            ));
         }
         let weight = weight.clamp(0.0, 1.0);
         let now = now_epoch();
@@ -1052,7 +1052,9 @@ fn migrate(conn: &Connection) -> std::result::Result<(), rusqlite::Error> {
     )?;
 
     let current = conn
-        .query_row("SELECT version FROM schema_info LIMIT 1", [], |row| row.get::<_, i64>(0))
+        .query_row("SELECT version FROM schema_info LIMIT 1", [], |row| {
+            row.get::<_, i64>(0)
+        })
         .unwrap_or(1);
     if current < STORE_SCHEMA_VERSION {
         conn.execute_batch(
@@ -1068,10 +1070,7 @@ fn migrate(conn: &Connection) -> std::result::Result<(), rusqlite::Error> {
               SELECT rowid,id,name,definition,labels_json FROM concepts;
             "#,
         )?;
-        conn.execute(
-            "UPDATE schema_info SET version=?1",
-            [STORE_SCHEMA_VERSION],
-        )?;
+        conn.execute("UPDATE schema_info SET version=?1", [STORE_SCHEMA_VERSION])?;
     }
     Ok(())
 }
@@ -1140,10 +1139,18 @@ mod tests {
         let path = temp_db("kitt-memory-fts");
         let store = SqliteMemoryStore::open(&path).unwrap();
         store
-            .remember(memory("Prefere respostas curtas", Sensitivity::Private, false))
+            .remember(memory(
+                "Prefere respostas curtas",
+                Sensitivity::Private,
+                false,
+            ))
             .unwrap();
         store
-            .remember(memory("Use PostgreSQL for billing", Sensitivity::Private, false))
+            .remember(memory(
+                "Use PostgreSQL for billing",
+                Sensitivity::Private,
+                false,
+            ))
             .unwrap();
         let got = store
             .recall(&RecallQuery {
