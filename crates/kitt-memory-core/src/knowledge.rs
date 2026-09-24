@@ -96,7 +96,9 @@ impl NewConcept {
             ));
         }
         if !(0.0..=1.0).contains(&self.confidence) {
-            return Err(MemoryError::Invalid("concept confidence must be 0..1".into()));
+            return Err(MemoryError::Invalid(
+                "concept confidence must be 0..1".into(),
+            ));
         }
         let now = now_epoch();
         Ok(StoredConcept {
