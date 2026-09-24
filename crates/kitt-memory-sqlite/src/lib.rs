@@ -19,7 +19,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 const STORE_SCHEMA_VERSION: i64 = 2;
 const MEMORY_COLUMNS: &str =
-    "id,namespace,workspace_id,kind,content,normalized_content,status,sensitivity,scope,     importance,confidence,created_at,updated_at,last_accessed_at,access_count,valid_until,     supersedes_id,content_hash,pinned,metadata_json";
+    "m.id,m.namespace,m.workspace_id,m.kind,m.content,m.normalized_content,m.status,m.sensitivity,m.scope,m.importance,m.confidence,m.created_at,m.updated_at,m.last_accessed_at,m.access_count,m.valid_until,m.supersedes_id,m.content_hash,m.pinned,m.metadata_json";
 
 fn ensure_private_database_file(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
@@ -189,10 +189,10 @@ impl SqliteMemoryStore {
             })?
         };
 
-        if rows.is_empty() {
-            rows = self.with_conn(|conn| {
+        if rows.len() < cap {
+            let fallback = self.with_conn(|conn| {
                 let sql = format!(
-                    "SELECT {MEMORY_COLUMNS}, 0.0                      FROM memories m WHERE m.namespace=?1                        AND (m.workspace_id=?2 OR m.scope='global')                        AND m.status='ACTIVE'                        AND (m.valid_until IS NULL OR m.valid_until>?3)                      ORDER BY m.pinned DESC,m.importance DESC,m.updated_at DESC                      LIMIT ?4"
+                    "SELECT {MEMORY_COLUMNS}, 0.0 FROM memories m WHERE m.namespace=?1 AND (m.workspace_id=?2 OR m.scope='global') AND m.status='ACTIVE' AND (m.valid_until IS NULL OR m.valid_until>?3) ORDER BY m.pinned DESC,m.importance DESC,m.updated_at DESC LIMIT ?4"
                 );
                 let mut stmt = conn.prepare(&sql)?;
                 stmt.query_map(
@@ -201,6 +201,18 @@ impl SqliteMemoryStore {
                 )?
                 .collect::<std::result::Result<Vec<_>, _>>()
             })?;
+            let mut seen = rows
+                .iter()
+                .map(|(memory, _)| memory.id.clone())
+                .collect::<std::collections::HashSet<_>>();
+            for candidate in fallback {
+                if rows.len() >= cap {
+                    break;
+                }
+                if seen.insert(candidate.0.id.clone()) {
+                    rows.push(candidate);
+                }
+            }
         }
 
         rows.retain(|(memory, _)| sensitivity_allowed(memory.sensitivity, query));
@@ -896,7 +908,7 @@ fn load_one(
     conn: &Connection,
     id: &str,
 ) -> std::result::Result<Option<MemoryRecord>, rusqlite::Error> {
-    let sql = format!("SELECT {MEMORY_COLUMNS} FROM memories WHERE id=?1");
+    let sql = format!("SELECT {MEMORY_COLUMNS} FROM memories m WHERE m.id=?1");
     conn.query_row(&sql, [id], map_memory_row).optional()
 }
 
