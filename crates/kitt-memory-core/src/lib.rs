@@ -8,12 +8,10 @@ pub mod baseline;
 pub mod knowledge;
 pub mod ranking;
 
-pub use baseline::{
-    BaselineEntry, BaselineQuery, MemoryBaseline, build_memory_baseline,
-};
+pub use baseline::{BaselineEntry, BaselineQuery, MemoryBaseline, build_memory_baseline};
 pub use knowledge::{
-    CorrectionRecord, KnowledgeEdge, KnowledgeRelation, KnowledgeStore, NewConcept,
-    NewCorrection, StoredConcept,
+    CorrectionRecord, KnowledgeEdge, KnowledgeRelation, KnowledgeStore, NewConcept, NewCorrection,
+    StoredConcept,
 };
 pub use ranking::{
     MergeAssessment, MergeCandidate, MergeDisposition, SemanticReranker, SemanticScore,
