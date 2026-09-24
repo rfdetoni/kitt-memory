@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/kitt-memory-core", "crates/kitt-memory-sqlite", "apps/kitt-memory-migrate"]
 
 [workspace.package]
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
