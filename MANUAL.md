@@ -10,15 +10,15 @@ O **`kitt-memory`** provê o armazenamento de longa duração (long-term memory)
 Ele gerencia memórias episódicas, decisões arquiteturais, preferências de usuário e contexto histórico de projetos.
 
 ### Componentes:
-- **`kitt-memory-core`**: Definição de domínio, níveis de sensibilidade monotônica (`Public`, `Internal`, `Confidential`, `Secret`) e normalização.
+- **`kitt-memory-core`**: Definição de domínio, níveis de sensibilidade monotônica (`Public`, `Personal`, `Private`, `Secret`, `Ephemeral`) e normalização.
 - **`kitt-memory-sqlite`**: Driver de alta concorrência SQLite em modo WAL com transações atômicas e permissões de arquivo privadas (`0600` em Unix).
-- **`kitt-memory-migrate`**: Ferramenta CLI para inspecionar, reparar e migrar bases de dados de versões legadas para o **Schema Canônico V1**.
+- **`kitt-memory-migrate`**: Ferramenta CLI para inspecionar, reparar e migrar bases de dados de versões legadas para o **Schema Canônico V2**.
 
 ---
 
 ## 2. Requisitos de Sistema
 
-- **Rust**: 1.80+ (com `cargo`)
+- **Rust**: 1.85+ (com `cargo`)
 - **SQLite**: 3.35+ (compilado estaticamente ou dinâmico via `libsqlite3`)
 
 ---
@@ -108,3 +108,20 @@ cargo run --release --bin kitt-memory-migrate -- \
 1. **Permissões de Arquivo**: No Unix/macOS, o arquivo de banco é sempre criado com modo `0600` (leitura/escrita apenas pelo usuário).
 2. **Rejeição de Symlinks**: Symlinks são estritamente rejeitados para evitar ataques de redirecionamento de caminho.
 3. **Sensibilidade Monotônica**: Uma vez gravada como confidencial ou secreta, uma memória nunca sofre downgrade de sensibilidade por atualizações parciais.
+
+
+---
+
+## 7. Retrieval híbrido e baseline
+
+O schema v2 mantém o banco local e adiciona índices FTS5 para memórias, correções e conceitos. O recall usa um conjunto de candidatos limitado, combinando sinal lexical, retenção e prioridade. Um chamador pode opcionalmente fornecer um `SemanticReranker`; se esse componente falhar ou não existir, o caminho local continua funcional.
+
+`MemoryStore::baseline` produz um snapshot determinístico e limitado por orçamento. O retorno inclui `estimated_tokens`, `dropped_count` e `budget_pressure`, permitindo que Agent/Assistant reajam à pressão de contexto em vez de descartar memória silenciosamente.
+
+## 8. Consolidação conservadora
+
+Conteúdo exatamente igual após normalização continua sendo deduplicado automaticamente. Similaridade não exata não é fundida de forma cega: `find_merge_candidates` retorna `Equivalent`, `NeedsReview` ou `Distinct`. Mudanças de tipo e possíveis mudanças de polaridade/negação são direcionadas para revisão.
+
+## 9. Correções e conhecimento compartilhado
+
+O trait `KnowledgeStore` oferece um ledger de correções com contador de reutilização, conceitos revisáveis com confiança/proveniência e links tipados ponderados. Essas estruturas são neutras ao produto: não conhecem turnos, sessões ou Dreaming do Agent.

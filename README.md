@@ -2,7 +2,7 @@
 
 <p align="center">
   <strong>Persistent local memory engine for the K.I.T.T. ecosystem.</strong><br>
-  Rust · SQLite WAL · lexical retrieval · exact deduplication · privacy-aware egress
+  Rust · SQLite WAL/FTS5 · hybrid-ready retrieval · deterministic baselines · privacy-aware egress
 </p>
 
 <p align="center">
@@ -11,7 +11,7 @@
   <img alt="SQLite WAL" src="https://img.shields.io/badge/SQLite-WAL-003B57?logo=sqlite&logoColor=white">
 </p>
 
-K.I.T.T. Memory is the shared persistent memory data plane used across the ecosystem. It stores structured memories locally, retrieves them with lexical and priority-aware scoring, deduplicates exact content and preserves privacy sensitivity monotonically across updates and migrations.
+K.I.T.T. Memory is the shared persistent memory data plane used across the ecosystem. It stores structured memories locally, retrieves them through bounded FTS5 + retention-aware ranking with an optional semantic reranker, builds deterministic prompt baselines, keeps semantic consolidation conservative, and preserves privacy sensitivity monotonically across updates and migrations.
 
 ---
 
@@ -19,8 +19,12 @@ K.I.T.T. Memory is the shared persistent memory data plane used across the ecosy
 
 - Pure Rust memory-domain core.
 - SQLite WAL storage adapter with busy-timeout and write coordination.
-- Exact-content SHA-256 deduplication.
-- Lexical retrieval with recency, frequency, importance and pinned priority.
+- Exact-content SHA-256 deduplication plus conservative near-duplicate review candidates.
+- SQLite FTS5 candidate retrieval with retention-aware ranking.
+- Optional semantic reranking through a product-neutral `SemanticReranker` port; lexical/local behavior remains the fallback.
+- Deterministic, token-bounded memory baselines with explicit budget pressure and dropped-entry counts.
+- Shared correction ledger for learning from prior mistakes.
+- Shared concepts and weighted typed knowledge links without coupling the memory crate to Agent session semantics.
 - Workspace and namespace scoping.
 - Sensitivity levels: `public`, `personal`, `private`, `secret`, `ephemeral`.
 - Monotonic sensitivity enforcement on upsert, import and deduplication.
@@ -49,7 +53,7 @@ apps/
 └── kitt-memory-migrate/  idempotent legacy migration utility
 ```
 
-The domain core remains independent of GUI and HTTP concerns. Storage-specific behavior is isolated behind the memory-store abstraction.
+The domain core remains independent of GUI, HTTP and model-provider concerns. Storage-specific behavior is isolated behind store abstractions, while semantic ranking is injected through a small scoring port so the shared engine never requires a resident model service.
 
 ---
 
@@ -104,6 +108,14 @@ let results = store.recall(&RecallQuery {
     allow_private: true,
     allow_secret: false,
 })?;
+
+let baseline = store.baseline(&kitt_memory_core::BaselineQuery {
+    namespace: "agent-cli".into(),
+    workspace_id: "my-project".into(),
+    max_tokens: 500,
+    allow_private: true,
+    allow_secret: false,
+})?;
 ```
 
 ---
@@ -127,9 +139,11 @@ Migration is intended to be idempotent and uses the same deduplication and sensi
 The engine is optimized for a local, persistent workload rather than an external vector-database dependency:
 
 - WAL supports concurrent readers while writes remain coordinated.
-- Exact hashes prevent duplicate-row inflation.
-- Local indexes keep retrieval predictable.
-- Ranking is performed on bounded candidate sets rather than sending the whole memory store to a model.
+- Exact hashes prevent duplicate-row inflation; non-exact similarity is surfaced for review instead of being merged blindly.
+- FTS5 narrows lexical candidates before scoring, with bounded high-salience fallback candidates to preserve durable rules.
+- Retention ranking combines importance, confidence, freshness, access frequency and pinned state.
+- Optional semantic scoring reranks only the bounded candidate set; it is not a storage dependency.
+- Baseline generation is deterministic and token-bounded, which helps stable prompt prefixes and exposes memory pressure instead of silently hiding it.
 - Expired rows can be pruned instead of remaining permanent context baggage.
 
 This keeps memory useful to the Agent without making memory retrieval itself a network dependency.
@@ -179,3 +193,12 @@ Memory changes should preserve deterministic ranking behavior, migration idempot
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+
+## Consolidation safety
+
+`find_merge_candidates` returns conservative assessments rather than automatically collapsing paraphrases. Exact normalized content remains the only unconditional merge path. Similar entries, kind changes and polarity/negation changes are surfaced as review candidates so Agent-side Dreaming can decide whether to keep, merge or supersede them using evidence.
+
+## Shared learning primitives
+
+`KnowledgeStore` provides product-neutral corrections, concepts and links. These are intentionally independent from Agent conversation/history tables. The Agent can keep session evidence and Dreaming orchestration in its own repository while gradually moving durable reusable knowledge into the shared memory data plane.

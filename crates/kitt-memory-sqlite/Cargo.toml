@@ -9,3 +9,4 @@ license.workspace = true
 kitt-memory-core = { path = "../kitt-memory-core" }
 rusqlite.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
