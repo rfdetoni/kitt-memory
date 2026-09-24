@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use crate::{MemoryKind, MemoryRecord, NewMemory, Result, normalize};
+use crate::{MemoryRecord, NewMemory, Result, normalize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SemanticScore {
