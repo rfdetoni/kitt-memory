@@ -117,7 +117,9 @@ impl SqliteMemoryStore {
     pub fn import_legacy_agent_db(&self, source: impl AsRef<Path>) -> Result<usize> {
         let source = open_legacy_read_only(source.as_ref())?;
         let has_valid_from = {
-            let mut columns = source.prepare("PRAGMA table_info(memories)").map_err(storage)?;
+            let mut columns = source
+                .prepare("PRAGMA table_info(memories)")
+                .map_err(storage)?;
             let names = columns
                 .query_map([], |row| row.get::<_, String>(1))
                 .map_err(storage)?
@@ -881,7 +883,6 @@ impl KnowledgeStore for SqliteMemoryStore {
         }
         Ok(concepts)
     }
-
 }
 
 fn sensitivity_allowed(sensitivity: Sensitivity, query: &RecallQuery) -> bool {
@@ -1540,11 +1541,13 @@ mod tests {
         let found = store
             .search_concept_neighborhood("agent-cli", "ws", "operation", 2, 8)
             .unwrap();
-        let ids = found.iter().map(|item| item.id.as_str()).collect::<HashSet<_>>();
+        let ids = found
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<HashSet<_>>();
         assert!(ids.contains(a.id.as_str()));
         assert!(ids.contains(b.id.as_str()));
         assert!(ids.contains(c.id.as_str()));
         cleanup(&path);
     }
-
 }
