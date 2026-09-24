@@ -196,7 +196,7 @@ impl SqliteMemoryStore {
                 let mut stmt = conn.prepare(&sql)?;
                 stmt.query_map(
                     params![query.namespace, query.workspace_id, now, cap as i64],
-                    |row| Ok((map_memory_row(row)?, row.get::<_, f64>(20)?)),
+                    |row| Ok((map_memory_row(row)?, row.get::<_, f64>(20)? as f32)),
                 )?
                 .collect::<std::result::Result<Vec<_>, _>>()
             })?;
