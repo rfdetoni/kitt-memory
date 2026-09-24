@@ -114,7 +114,11 @@ pub fn build_memory_baseline(
 
     for (memory, label, _, score) in candidates {
         let content = truncate_chars(&memory.content, per_entry_chars);
-        let cost = content.chars().count().saturating_add(label.len()).saturating_add(8);
+        let cost = content
+            .chars()
+            .count()
+            .saturating_add(label.len())
+            .saturating_add(8);
         if !entries.is_empty() && used_chars.saturating_add(cost) > max_chars {
             continue;
         }
