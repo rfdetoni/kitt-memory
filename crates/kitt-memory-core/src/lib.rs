@@ -197,11 +197,20 @@ pub struct MemoryRecord {
     pub updated_at: i64,
     pub last_accessed_at: Option<i64>,
     pub access_count: u64,
+    #[serde(default)]
+    pub valid_from: Option<i64>,
     pub valid_until: Option<i64>,
     pub supersedes_id: Option<String>,
     pub content_hash: String,
     pub pinned: bool,
     pub metadata_json: String,
+}
+
+impl MemoryRecord {
+    pub fn is_valid_at(&self, at: i64) -> bool {
+        self.valid_from.is_none_or(|from| from <= at)
+            && self.valid_until.is_none_or(|until| until > at)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -248,6 +257,7 @@ impl NewMemory {
             updated_at: now,
             last_accessed_at: None,
             access_count: 0,
+            valid_from: Some(now),
             valid_until: self
                 .ttl_seconds
                 .map(|ttl| now.saturating_add(i64::try_from(ttl).unwrap_or(i64::MAX))),

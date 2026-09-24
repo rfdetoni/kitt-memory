@@ -36,7 +36,7 @@ fn allowed(memory: &MemoryRecord, query: &BaselineQuery, now: i64) -> bool {
     if memory.status != MemoryStatus::Active
         || memory.namespace != query.namespace
         || (memory.workspace_id != query.workspace_id && memory.scope != MemoryScope::Global)
-        || memory.valid_until.is_some_and(|until| until <= now)
+        || !memory.is_valid_at(now)
     {
         return false;
     }
@@ -174,6 +174,7 @@ mod tests {
             updated_at: 1,
             last_accessed_at: None,
             access_count: 0,
+            valid_from: Some(1),
             valid_until: None,
             supersedes_id: None,
             content_hash: String::new(),

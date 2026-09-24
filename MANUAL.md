@@ -12,7 +12,7 @@ Ele gerencia memórias episódicas, decisões arquiteturais, preferências de us
 ### Componentes:
 - **`kitt-memory-core`**: Definição de domínio, níveis de sensibilidade monotônica (`Public`, `Personal`, `Private`, `Secret`, `Ephemeral`) e normalização.
 - **`kitt-memory-sqlite`**: Driver de alta concorrência SQLite em modo WAL com transações atômicas e permissões de arquivo privadas (`0600` em Unix).
-- **`kitt-memory-migrate`**: Ferramenta CLI para inspecionar, reparar e migrar bases de dados de versões legadas para o **Schema Canônico V2**.
+- **`kitt-memory-migrate`**: Ferramenta CLI para inspecionar, reparar e migrar bases de dados de versões legadas para o **Schema Canônico V3**.
 
 ---
 
@@ -114,7 +114,9 @@ cargo run --release --bin kitt-memory-migrate -- \
 
 ## 7. Retrieval híbrido e baseline
 
-O schema v2 mantém o banco local e adiciona índices FTS5 para memórias, correções e conceitos. O recall usa um conjunto de candidatos limitado, combinando sinal lexical, retenção e prioridade. Um chamador pode opcionalmente fornecer um `SemanticReranker`; se esse componente falhar ou não existir, o caminho local continua funcional.
+O schema v3 mantém o banco local/FTS5 e adiciona validade temporal explícita. Cada memória pode carregar `valid_from` e `valid_until`; recall e baseline filtram registros fora da janela válida antes do ranking. Ao marcar uma memória como `SUPERSEDED` ou `ARCHIVED`, o store fecha a janela temporal aberta sem apagar o registro histórico.
+
+O recall usa um conjunto de candidatos limitado, combinando sinal lexical, retenção e prioridade. Um chamador pode opcionalmente fornecer um `SemanticReranker`; se esse componente falhar ou não existir, o caminho local continua funcional.
 
 `MemoryStore::baseline` produz um snapshot determinístico e limitado por orçamento. O retorno inclui `estimated_tokens`, `dropped_count` e `budget_pressure`, permitindo que Agent/Assistant reajam à pressão de contexto em vez de descartar memória silenciosamente.
 
@@ -125,3 +127,5 @@ Conteúdo exatamente igual após normalização continua sendo deduplicado autom
 ## 9. Correções e conhecimento compartilhado
 
 O trait `KnowledgeStore` oferece um ledger de correções com contador de reutilização, conceitos revisáveis com confiança/proveniência e links tipados ponderados. Essas estruturas são neutras ao produto: não conhecem turnos, sessões ou Dreaming do Agent.
+
+`search_concept_neighborhood` parte de conceitos encontrados por FTS e expande relações de forma limitada e cycle-safe (até 4 hops e 100 conceitos). Isso permite recuperação orientada a grafo sem introduzir um banco de grafos residente.

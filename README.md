@@ -25,6 +25,8 @@ K.I.T.T. Memory is the shared persistent memory data plane used across the ecosy
 - Deterministic, token-bounded memory baselines with explicit budget pressure and dropped-entry counts.
 - Shared correction ledger for learning from prior mistakes.
 - Shared concepts and weighted typed knowledge links without coupling the memory crate to Agent session semantics.
+- Temporal memory validity with `valid_from` / `valid_until` and validity-closing supersession.
+- Bounded concept-neighborhood expansion (up to four hops) for graph-aware retrieval.
 - Workspace and namespace scoping.
 - Sensitivity levels: `public`, `personal`, `private`, `secret`, `ephemeral`.
 - Monotonic sensitivity enforcement on upsert, import and deduplication.
@@ -59,7 +61,7 @@ The domain core remains independent of GUI, HTTP and model-provider concerns. St
 
 ## Memory model
 
-A memory carries more than text. Retrieval and egress decisions can use its namespace, workspace scope, kind, importance, confidence, pinned status, expiry and sensitivity.
+A memory carries more than text. Retrieval and egress decisions can use its namespace, workspace scope, kind, importance, confidence, pinned status, temporal validity and sensitivity. New durable memories start with `valid_from = now`; recall and baselines ignore facts that are not valid yet or are already expired. Superseding/archiving closes an open validity interval instead of silently erasing history.
 
 The key privacy invariant is monotonic sensitivity:
 
@@ -142,6 +144,8 @@ The engine is optimized for a local, persistent workload rather than an external
 - Exact hashes prevent duplicate-row inflation; non-exact similarity is surfaced for review instead of being merged blindly.
 - FTS5 narrows lexical candidates before scoring, with bounded high-salience fallback candidates to preserve durable rules.
 - Retention ranking combines importance, confidence, freshness, access frequency and pinned state.
+- Temporal predicates are applied before ranking, backed by a dedicated temporal lookup index.
+- Concept search can expand through a bounded, cycle-safe knowledge neighborhood after FTS seed selection.
 - Optional semantic scoring reranks only the bounded candidate set; it is not a storage dependency.
 - Baseline generation is deterministic and token-bounded, which helps stable prompt prefixes and exposes memory pressure instead of silently hiding it.
 - Expired rows can be pruned instead of remaining permanent context baggage.
@@ -202,3 +206,5 @@ MIT. See [LICENSE](LICENSE).
 ## Shared learning primitives
 
 `KnowledgeStore` provides product-neutral corrections, concepts and links. These are intentionally independent from Agent conversation/history tables. The Agent can keep session evidence and Dreaming orchestration in its own repository while gradually moving durable reusable knowledge into the shared memory data plane.
+
+`search_concept_neighborhood` combines FTS concept seeds with bounded graph expansion. The default expansion is cycle-safe, scoped to the same namespace/workspace, capped at four hops and one hundred concepts, and does not introduce a graph-database dependency.

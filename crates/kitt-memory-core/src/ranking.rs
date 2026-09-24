@@ -179,6 +179,7 @@ mod tests {
             updated_at: 1,
             last_accessed_at: None,
             access_count: 0,
+            valid_from: Some(1),
             valid_until: None,
             supersedes_id: None,
             content_hash: String::new(),

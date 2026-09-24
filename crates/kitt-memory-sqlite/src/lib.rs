@@ -7,7 +7,7 @@ use kitt_memory_core::{
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
     sync::Mutex,
@@ -17,8 +17,8 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-const STORE_SCHEMA_VERSION: i64 = 2;
-const MEMORY_COLUMNS: &str = "m.id,m.namespace,m.workspace_id,m.kind,m.content,m.normalized_content,m.status,m.sensitivity,m.scope,m.importance,m.confidence,m.created_at,m.updated_at,m.last_accessed_at,m.access_count,m.valid_until,m.supersedes_id,m.content_hash,m.pinned,m.metadata_json";
+const STORE_SCHEMA_VERSION: i64 = 3;
+const MEMORY_COLUMNS: &str = "m.id,m.namespace,m.workspace_id,m.kind,m.content,m.normalized_content,m.status,m.sensitivity,m.scope,m.importance,m.confidence,m.created_at,m.updated_at,m.last_accessed_at,m.access_count,m.valid_from,m.valid_until,m.supersedes_id,m.content_hash,m.pinned,m.metadata_json";
 
 fn ensure_private_database_file(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
@@ -116,9 +116,21 @@ impl SqliteMemoryStore {
 
     pub fn import_legacy_agent_db(&self, source: impl AsRef<Path>) -> Result<usize> {
         let source = open_legacy_read_only(source.as_ref())?;
-        let mut stmt = source.prepare(
-            "SELECT id, workspace_id, kind, content, normalized_content, status, importance,              confidence, created_at, updated_at, last_accessed_at, access_count, valid_until,              supersedes_id, content_hash, pinned, COALESCE(metadata_json,'{}') FROM memories",
-        ).map_err(storage)?;
+        let has_valid_from = {
+            let mut columns = source.prepare("PRAGMA table_info(memories)").map_err(storage)?;
+            let names = columns
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(storage)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(storage)?;
+            names.iter().any(|name| name == "valid_from")
+        };
+        let import_sql = if has_valid_from {
+            "SELECT id, workspace_id, kind, content, normalized_content, status, importance,              confidence, created_at, updated_at, last_accessed_at, access_count, valid_from, valid_until,              supersedes_id, content_hash, pinned, COALESCE(metadata_json,'{}') FROM memories"
+        } else {
+            "SELECT id, workspace_id, kind, content, normalized_content, status, importance,              confidence, created_at, updated_at, last_accessed_at, access_count, created_at AS valid_from, valid_until,              supersedes_id, content_hash, pinned, COALESCE(metadata_json,'{}') FROM memories"
+        };
+        let mut stmt = source.prepare(import_sql).map_err(storage)?;
         let rows = stmt
             .query_map([], |row| {
                 Ok(MemoryRecord {
@@ -137,11 +149,12 @@ impl SqliteMemoryStore {
                     updated_at: row.get::<_, f64>(9)? as i64,
                     last_accessed_at: row.get::<_, Option<f64>>(10)?.map(|value| value as i64),
                     access_count: row.get::<_, i64>(11)? as u64,
-                    valid_until: row.get::<_, Option<f64>>(12)?.map(|value| value as i64),
-                    supersedes_id: row.get(13)?,
-                    content_hash: row.get(14)?,
-                    pinned: row.get::<_, i64>(15)? != 0,
-                    metadata_json: row.get(16)?,
+                    valid_from: row.get::<_, Option<f64>>(12)?.map(|value| value as i64),
+                    valid_until: row.get::<_, Option<f64>>(13)?.map(|value| value as i64),
+                    supersedes_id: row.get(14)?,
+                    content_hash: row.get(15)?,
+                    pinned: row.get::<_, i64>(16)? != 0,
+                    metadata_json: row.get(17)?,
                 })
             })
             .map_err(storage)?;
@@ -177,12 +190,12 @@ impl SqliteMemoryStore {
         } else {
             self.with_conn(|conn| {
                 let sql = format!(
-                    "SELECT {MEMORY_COLUMNS}, bm25(memories_fts)                      FROM memories_fts JOIN memories m ON m.rowid=memories_fts.rowid                      WHERE memories_fts MATCH ?1 AND m.namespace=?2                        AND (m.workspace_id=?3 OR m.scope='global')                        AND m.status='ACTIVE'                        AND (m.valid_until IS NULL OR m.valid_until>?4)                      ORDER BY bm25(memories_fts) ASC LIMIT ?5"
+                    "SELECT {MEMORY_COLUMNS}, bm25(memories_fts)                      FROM memories_fts JOIN memories m ON m.rowid=memories_fts.rowid                      WHERE memories_fts MATCH ?1 AND m.namespace=?2                        AND (m.workspace_id=?3 OR m.scope='global')                        AND m.status='ACTIVE'                        AND (m.valid_from IS NULL OR m.valid_from<=?4)                        AND (m.valid_until IS NULL OR m.valid_until>?4)                      ORDER BY bm25(memories_fts) ASC LIMIT ?5"
                 );
                 let mut stmt = conn.prepare(&sql)?;
                 stmt.query_map(
                     params![fts, query.namespace, query.workspace_id, now, cap as i64],
-                    |row| Ok((map_memory_row(row)?, row.get::<_, f64>(20)? as f32)),
+                    |row| Ok((map_memory_row(row)?, row.get::<_, f64>(21)? as f32)),
                 )?
                 .collect::<std::result::Result<Vec<_>, _>>()
             })?
@@ -191,12 +204,12 @@ impl SqliteMemoryStore {
         if rows.len() < cap {
             let fallback = self.with_conn(|conn| {
                 let sql = format!(
-                    "SELECT {MEMORY_COLUMNS}, 0.0 FROM memories m WHERE m.namespace=?1 AND (m.workspace_id=?2 OR m.scope='global') AND m.status='ACTIVE' AND (m.valid_until IS NULL OR m.valid_until>?3) ORDER BY m.pinned DESC,m.importance DESC,m.updated_at DESC LIMIT ?4"
+                    "SELECT {MEMORY_COLUMNS}, 0.0 FROM memories m WHERE m.namespace=?1 AND (m.workspace_id=?2 OR m.scope='global') AND m.status='ACTIVE' AND (m.valid_from IS NULL OR m.valid_from<=?3) AND (m.valid_until IS NULL OR m.valid_until>?3) ORDER BY m.pinned DESC,m.importance DESC,m.updated_at DESC LIMIT ?4"
                 );
                 let mut stmt = conn.prepare(&sql)?;
                 stmt.query_map(
                     params![query.namespace, query.workspace_id, now, cap as i64],
-                    |row| Ok((map_memory_row(row)?, row.get::<_, f64>(20)? as f32)),
+                    |row| Ok((map_memory_row(row)?, row.get::<_, f64>(21)? as f32)),
                 )?
                 .collect::<std::result::Result<Vec<_>, _>>()
             })?;
@@ -362,7 +375,7 @@ impl MemoryStore for SqliteMemoryStore {
             merged.sensitivity = existing.sensitivity.most_restrictive(memory.sensitivity);
         }
         conn.execute(
-            "INSERT INTO memories(id,namespace,workspace_id,kind,content,normalized_content,status,             sensitivity,scope,importance,confidence,created_at,updated_at,last_accessed_at,             access_count,valid_until,supersedes_id,content_hash,pinned,metadata_json)              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)              ON CONFLICT(id) DO UPDATE SET              namespace=excluded.namespace,workspace_id=excluded.workspace_id,kind=excluded.kind,             content=excluded.content,normalized_content=excluded.normalized_content,             status=excluded.status,sensitivity=excluded.sensitivity,scope=excluded.scope,             importance=excluded.importance,confidence=excluded.confidence,             updated_at=excluded.updated_at,last_accessed_at=excluded.last_accessed_at,             access_count=excluded.access_count,valid_until=excluded.valid_until,             supersedes_id=excluded.supersedes_id,content_hash=excluded.content_hash,             pinned=excluded.pinned,metadata_json=excluded.metadata_json",
+            "INSERT INTO memories(id,namespace,workspace_id,kind,content,normalized_content,status,             sensitivity,scope,importance,confidence,created_at,updated_at,last_accessed_at,             access_count,valid_from,valid_until,supersedes_id,content_hash,pinned,metadata_json)              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)              ON CONFLICT(id) DO UPDATE SET              namespace=excluded.namespace,workspace_id=excluded.workspace_id,kind=excluded.kind,             content=excluded.content,normalized_content=excluded.normalized_content,             status=excluded.status,sensitivity=excluded.sensitivity,scope=excluded.scope,             importance=excluded.importance,confidence=excluded.confidence,             updated_at=excluded.updated_at,last_accessed_at=excluded.last_accessed_at,             access_count=excluded.access_count,valid_from=excluded.valid_from,valid_until=excluded.valid_until,             supersedes_id=excluded.supersedes_id,content_hash=excluded.content_hash,             pinned=excluded.pinned,metadata_json=excluded.metadata_json",
             params![
                 merged.id,
                 merged.namespace,
@@ -379,6 +392,7 @@ impl MemoryStore for SqliteMemoryStore {
                 merged.updated_at,
                 merged.last_accessed_at,
                 merged.access_count as i64,
+                merged.valid_from,
                 merged.valid_until,
                 merged.supersedes_id,
                 merged.content_hash,
@@ -406,7 +420,7 @@ impl MemoryStore for SqliteMemoryStore {
         let now = now_epoch();
         let records = self.with_conn(|conn| {
             let sql = format!(
-                "SELECT {MEMORY_COLUMNS} FROM memories m                  WHERE m.namespace=?1 AND (m.workspace_id=?2 OR m.scope='global')                    AND m.status='ACTIVE' AND (m.valid_until IS NULL OR m.valid_until>?3)                  ORDER BY m.pinned DESC,m.importance DESC,m.updated_at DESC LIMIT 512"
+                "SELECT {MEMORY_COLUMNS} FROM memories m                  WHERE m.namespace=?1 AND (m.workspace_id=?2 OR m.scope='global')                    AND m.status='ACTIVE' AND (m.valid_from IS NULL OR m.valid_from<=?3) AND (m.valid_until IS NULL OR m.valid_until>?3)                  ORDER BY m.pinned DESC,m.importance DESC,m.updated_at DESC LIMIT 512"
             );
             let mut stmt = conn.prepare(&sql)?;
             stmt.query_map(params![query.namespace, query.workspace_id, now], map_memory_row)?
@@ -483,19 +497,27 @@ impl MemoryStore for SqliteMemoryStore {
         supersedes_id: Option<&str>,
     ) -> Result<bool> {
         let conn = self.writer_conn()?;
-        Ok(conn
-            .execute(
-                "UPDATE memories SET status=?1,supersedes_id=?2,updated_at=?3 WHERE id=?4",
-                params![status.as_db(), supersedes_id, now_epoch(), id],
+        let now = now_epoch();
+        let closes_validity = matches!(&status, MemoryStatus::Superseded | MemoryStatus::Archived);
+        let changed = if closes_validity {
+            conn.execute(
+                "UPDATE memories SET status=?1,supersedes_id=?2,updated_at=?3,                 valid_until=COALESCE(valid_until,?3) WHERE id=?4",
+                params![status.as_db(), supersedes_id, now, id],
             )
-            .map_err(storage)?
-            > 0)
+        } else {
+            conn.execute(
+                "UPDATE memories SET status=?1,supersedes_id=?2,updated_at=?3 WHERE id=?4",
+                params![status.as_db(), supersedes_id, now, id],
+            )
+        }
+        .map_err(storage)?;
+        Ok(changed > 0)
     }
 
     fn prune_expired(&self) -> Result<usize> {
         let conn = self.writer_conn()?;
         conn.execute(
-            "DELETE FROM memories WHERE valid_until IS NOT NULL AND valid_until<=?1",
+            "DELETE FROM memories WHERE status='ACTIVE' AND valid_until IS NOT NULL AND valid_until<=?1",
             [now_epoch()],
         )
         .map_err(storage)
@@ -532,7 +554,7 @@ impl MemoryStore for SqliteMemoryStore {
         for (id, keep) in &superseded {
             changed += tx
                 .execute(
-                    "UPDATE memories SET status='SUPERSEDED',supersedes_id=?1,updated_at=?2                      WHERE id=?3 AND status='ACTIVE'",
+                    "UPDATE memories SET status='SUPERSEDED',supersedes_id=?1,updated_at=?2,                     valid_until=COALESCE(valid_until,?2) WHERE id=?3 AND status='ACTIVE'",
                     params![keep, updated_at, id],
                 )
                 .map_err(storage)?;
@@ -808,6 +830,58 @@ impl KnowledgeStore for SqliteMemoryStore {
             .collect::<std::result::Result<Vec<_>, _>>()
         })
     }
+    fn expand_concepts(
+        &self,
+        namespace: &str,
+        workspace_id: &str,
+        seed_ids: &[String],
+        max_hops: usize,
+        limit: usize,
+    ) -> Result<Vec<StoredConcept>> {
+        let max_hops = max_hops.min(4);
+        let limit = limit.clamp(1, 100);
+        let mut queue = VecDeque::new();
+        for seed in seed_ids.iter().take(16) {
+            if !seed.trim().is_empty() {
+                queue.push_back((seed.clone(), 0usize));
+            }
+        }
+
+        let mut visited = HashSet::new();
+        let mut concepts = Vec::new();
+        while let Some((concept_id, depth)) = queue.pop_front() {
+            if concepts.len() >= limit || !visited.insert(concept_id.clone()) {
+                continue;
+            }
+            let concept = self.with_conn(|conn| {
+                conn.query_row(
+                    "SELECT id,namespace,workspace_id,name,definition,confidence,revision,                     labels_json,source_memory_ids_json,created_at,updated_at FROM concepts                      WHERE namespace=?1 AND workspace_id=?2 AND id=?3",
+                    params![namespace, workspace_id, concept_id],
+                    map_concept,
+                )
+                .optional()
+            })?;
+            let Some(concept) = concept else {
+                continue;
+            };
+            concepts.push(concept);
+            if depth >= max_hops {
+                continue;
+            }
+            for edge in self.links_for_concept(namespace, workspace_id, &concept_id)? {
+                let neighbor = if edge.source_id == concept_id {
+                    edge.target_id
+                } else {
+                    edge.source_id
+                };
+                if !visited.contains(&neighbor) {
+                    queue.push_back((neighbor, depth + 1));
+                }
+            }
+        }
+        Ok(concepts)
+    }
+
 }
 
 fn sensitivity_allowed(sensitivity: Sensitivity, query: &RecallQuery) -> bool {
@@ -853,7 +927,7 @@ fn insert_record(
     memory: &MemoryRecord,
 ) -> std::result::Result<usize, rusqlite::Error> {
     conn.execute(
-        "INSERT INTO memories(id,namespace,workspace_id,kind,content,normalized_content,status,         sensitivity,scope,importance,confidence,created_at,updated_at,last_accessed_at,access_count,         valid_until,supersedes_id,content_hash,pinned,metadata_json)          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
+        "INSERT INTO memories(id,namespace,workspace_id,kind,content,normalized_content,status,         sensitivity,scope,importance,confidence,created_at,updated_at,last_accessed_at,access_count,         valid_from,valid_until,supersedes_id,content_hash,pinned,metadata_json)          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
         params![
             memory.id,
             memory.namespace,
@@ -870,6 +944,7 @@ fn insert_record(
             memory.updated_at,
             memory.last_accessed_at,
             memory.access_count as i64,
+            memory.valid_from,
             memory.valid_until,
             memory.supersedes_id,
             memory.content_hash,
@@ -896,11 +971,12 @@ fn map_memory_row(row: &rusqlite::Row<'_>) -> std::result::Result<MemoryRecord, 
         updated_at: row.get(12)?,
         last_accessed_at: row.get(13)?,
         access_count: row.get::<_, i64>(14)? as u64,
-        valid_until: row.get(15)?,
-        supersedes_id: row.get(16)?,
-        content_hash: row.get(17)?,
-        pinned: row.get::<_, i64>(18)? != 0,
-        metadata_json: row.get(19)?,
+        valid_from: row.get(15)?,
+        valid_until: row.get(16)?,
+        supersedes_id: row.get(17)?,
+        content_hash: row.get(18)?,
+        pinned: row.get::<_, i64>(19)? != 0,
+        metadata_json: row.get(20)?,
     })
 }
 
@@ -960,7 +1036,7 @@ fn migrate(conn: &Connection) -> std::result::Result<(), rusqlite::Error> {
           content TEXT NOT NULL, normalized_content TEXT NOT NULL, status TEXT NOT NULL,
           sensitivity TEXT NOT NULL, scope TEXT NOT NULL, importance REAL NOT NULL, confidence REAL NOT NULL,
           created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, last_accessed_at INTEGER,
-          access_count INTEGER NOT NULL DEFAULT 0, valid_until INTEGER, supersedes_id TEXT,
+          access_count INTEGER NOT NULL DEFAULT 0, valid_from INTEGER, valid_until INTEGER, supersedes_id TEXT,
           content_hash TEXT NOT NULL, pinned INTEGER NOT NULL DEFAULT 0, metadata_json TEXT NOT NULL DEFAULT '{}'
         );
         CREATE INDEX IF NOT EXISTS idx_memories_lookup
@@ -1056,7 +1132,7 @@ fn migrate(conn: &Connection) -> std::result::Result<(), rusqlite::Error> {
             row.get::<_, i64>(0)
         })
         .unwrap_or(1);
-    if current < STORE_SCHEMA_VERSION {
+    if current < 2 {
         conn.execute_batch(
             r#"
             DELETE FROM memories_fts;
@@ -1070,6 +1146,28 @@ fn migrate(conn: &Connection) -> std::result::Result<(), rusqlite::Error> {
               SELECT rowid,id,name,definition,labels_json FROM concepts;
             "#,
         )?;
+    }
+    if current < 3 {
+        let has_valid_from = {
+            let mut stmt = conn.prepare("PRAGMA table_info(memories)")?;
+            let columns = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            columns.iter().any(|name| name == "valid_from")
+        };
+        if !has_valid_from {
+            conn.execute("ALTER TABLE memories ADD COLUMN valid_from INTEGER", [])?;
+        }
+        conn.execute(
+            "UPDATE memories SET valid_from=created_at WHERE valid_from IS NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memories_temporal_lookup          ON memories(namespace,workspace_id,status,valid_from,valid_until,pinned,importance)",
+        [],
+    )?;
+    if current < STORE_SCHEMA_VERSION {
         conn.execute("UPDATE schema_info SET version=?1", [STORE_SCHEMA_VERSION])?;
     }
     Ok(())
@@ -1354,4 +1452,99 @@ mod tests {
         assert_eq!(Sensitivity::Secret, row.sensitivity);
         cleanup(&path);
     }
+    #[test]
+    fn future_memory_is_hidden_until_valid_from() {
+        let path = temp_db("kitt-memory-valid-from");
+        let store = SqliteMemoryStore::open(&path).unwrap();
+        let mut record = memory("future architecture decision", Sensitivity::Private, false)
+            .into_record()
+            .unwrap();
+        let now = now_epoch();
+        record.valid_from = Some(now + 3600);
+        store.upsert_record(&record).unwrap();
+
+        let query = RecallQuery {
+            namespace: "assistant".into(),
+            workspace_id: "global".into(),
+            text: "future architecture".into(),
+            limit: 5,
+            allow_private: true,
+            allow_secret: false,
+        };
+        assert!(store.recall(&query).unwrap().is_empty());
+
+        record.valid_from = Some(now - 1);
+        store.upsert_record(&record).unwrap();
+        assert_eq!(store.recall(&query).unwrap().len(), 1);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn concept_neighborhood_expands_links_without_cycles() {
+        let path = temp_db("kitt-memory-neighborhood");
+        let store = SqliteMemoryStore::open(&path).unwrap();
+        let a = store
+            .upsert_concept(NewConcept {
+                namespace: "agent-cli".into(),
+                workspace_id: "ws".into(),
+                name: "operation-service".into(),
+                definition: "Owns settlement orchestration".into(),
+                confidence: 0.9,
+                labels: vec!["domain:operations".into()],
+                source_memory_ids: Vec::new(),
+            })
+            .unwrap();
+        let b = store
+            .upsert_concept(NewConcept {
+                namespace: "agent-cli".into(),
+                workspace_id: "ws".into(),
+                name: "settlement-worker".into(),
+                definition: "Executes scheduled settlement".into(),
+                confidence: 0.8,
+                labels: vec!["type:worker".into()],
+                source_memory_ids: Vec::new(),
+            })
+            .unwrap();
+        let c = store
+            .upsert_concept(NewConcept {
+                namespace: "agent-cli".into(),
+                workspace_id: "ws".into(),
+                name: "settlement-ledger".into(),
+                definition: "Stores settlement state".into(),
+                confidence: 0.8,
+                labels: vec!["type:storage".into()],
+                source_memory_ids: Vec::new(),
+            })
+            .unwrap();
+        store
+            .link_concepts(
+                "agent-cli",
+                "ws",
+                &a.id,
+                &b.id,
+                KnowledgeRelation::Requires,
+                0.9,
+            )
+            .unwrap();
+        store
+            .link_concepts(
+                "agent-cli",
+                "ws",
+                &b.id,
+                &c.id,
+                KnowledgeRelation::Requires,
+                0.8,
+            )
+            .unwrap();
+
+        let found = store
+            .search_concept_neighborhood("agent-cli", "ws", "operation", 2, 8)
+            .unwrap();
+        let ids = found.iter().map(|item| item.id.as_str()).collect::<HashSet<_>>();
+        assert!(ids.contains(a.id.as_str()));
+        assert!(ids.contains(b.id.as_str()));
+        assert!(ids.contains(c.id.as_str()));
+        cleanup(&path);
+    }
+
 }

@@ -209,4 +209,38 @@ pub trait KnowledgeStore: Send + Sync {
         workspace_id: &str,
         concept_id: &str,
     ) -> Result<Vec<KnowledgeEdge>>;
+
+    fn expand_concepts(
+        &self,
+        _namespace: &str,
+        _workspace_id: &str,
+        _seed_ids: &[String],
+        _max_hops: usize,
+        _limit: usize,
+    ) -> Result<Vec<StoredConcept>> {
+        Ok(Vec::new())
+    }
+
+    fn search_concept_neighborhood(
+        &self,
+        namespace: &str,
+        workspace_id: &str,
+        query: &str,
+        max_hops: usize,
+        limit: usize,
+    ) -> Result<Vec<StoredConcept>> {
+        let seed_limit = limit.clamp(1, 100).min(8);
+        let seeds = self.search_concepts(namespace, workspace_id, query, seed_limit)?;
+        let seed_ids = seeds
+            .iter()
+            .map(|concept| concept.id.clone())
+            .collect::<Vec<_>>();
+        self.expand_concepts(
+            namespace,
+            workspace_id,
+            &seed_ids,
+            max_hops.clamp(0, 4),
+            limit.clamp(1, 100),
+        )
+    }
 }
