@@ -1,9 +1,24 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use uuid::Uuid;
+
+pub mod baseline;
+pub mod knowledge;
+pub mod ranking;
+
+pub use baseline::{
+    BaselineEntry, BaselineQuery, MemoryBaseline, build_memory_baseline,
+};
+pub use knowledge::{
+    CorrectionRecord, KnowledgeEdge, KnowledgeRelation, KnowledgeStore, NewConcept,
+    NewCorrection, StoredConcept,
+};
+pub use ranking::{
+    MergeAssessment, MergeCandidate, MergeDisposition, SemanticReranker, SemanticScore,
+    assess_merge_candidate, lexical_similarity, retention_score,
+};
 
 #[derive(Debug, Error)]
 pub enum MemoryError {
@@ -47,8 +62,9 @@ impl MemoryKind {
             Self::Routine => "ROUTINE",
         }
     }
-    pub fn from_db(v: &str) -> Self {
-        match v {
+
+    pub fn from_db(value: &str) -> Self {
+        match value {
             "USER_PREFERENCE" => Self::UserPreference,
             "PROJECT_RULE" => Self::ProjectRule,
             "ARCHITECTURE_DECISION" => Self::ArchitectureDecision,
@@ -84,8 +100,9 @@ impl Sensitivity {
             Self::Ephemeral => "ephemeral",
         }
     }
-    pub fn from_db(v: &str) -> Self {
-        match v {
+
+    pub fn from_db(value: &str) -> Self {
+        match value {
             "public" => Self::Public,
             "personal" => Self::Personal,
             "secret" => Self::Secret,
@@ -93,6 +110,7 @@ impl Sensitivity {
             _ => Self::Private,
         }
     }
+
     pub fn restriction_rank(self) -> u8 {
         match self {
             Self::Public => 0,
@@ -102,6 +120,7 @@ impl Sensitivity {
             Self::Ephemeral => 4,
         }
     }
+
     pub fn most_restrictive(self, other: Self) -> Self {
         if self.restriction_rank() >= other.restriction_rank() {
             self
@@ -127,8 +146,9 @@ impl MemoryScope {
             Self::Conversation => "conversation",
         }
     }
-    pub fn from_db(v: &str) -> Self {
-        match v {
+
+    pub fn from_db(value: &str) -> Self {
+        match value {
             "global" => Self::Global,
             "conversation" => Self::Conversation,
             _ => Self::Workspace,
@@ -152,8 +172,9 @@ impl MemoryStatus {
             Self::Archived => "ARCHIVED",
         }
     }
-    pub fn from_db(v: &str) -> Self {
-        match v {
+
+    pub fn from_db(value: &str) -> Self {
+        match value {
             "SUPERSEDED" => Self::Superseded,
             "ARCHIVED" => Self::Archived,
             _ => Self::Active,
@@ -254,6 +275,30 @@ pub trait MemoryStore: Send + Sync {
     fn remember(&self, memory: NewMemory) -> Result<MemoryRecord>;
     fn upsert_record(&self, memory: &MemoryRecord) -> Result<()>;
     fn recall(&self, query: &RecallQuery) -> Result<Vec<MemoryRecord>>;
+
+    fn recall_with_reranker(
+        &self,
+        query: &RecallQuery,
+        _reranker: &dyn SemanticReranker,
+    ) -> Result<Vec<MemoryRecord>> {
+        self.recall(query)
+    }
+
+    fn baseline(&self, _query: &BaselineQuery) -> Result<MemoryBaseline> {
+        Err(MemoryError::Invalid(
+            "baseline snapshots are not implemented by this store".into(),
+        ))
+    }
+
+    fn find_merge_candidates(
+        &self,
+        _memory: &NewMemory,
+        _limit: usize,
+        _reranker: Option<&dyn SemanticReranker>,
+    ) -> Result<Vec<MergeCandidate>> {
+        Ok(Vec::new())
+    }
+
     fn forget(&self, id: &str) -> Result<bool>;
     fn set_status(
         &self,
@@ -270,69 +315,42 @@ pub struct EgressPolicy {
     pub is_local_provider: bool,
     pub allow_personal_remote: bool,
 }
+
 impl EgressPolicy {
     pub fn allows(self, sensitivity: Sensitivity) -> bool {
         match sensitivity {
-            Sensitivity::Ephemeral | Sensitivity::Secret => self.is_local_provider,
-            Sensitivity::Private => self.is_local_provider,
+            Sensitivity::Ephemeral | Sensitivity::Secret | Sensitivity::Private => {
+                self.is_local_provider
+            }
             Sensitivity::Personal => self.is_local_provider || self.allow_personal_remote,
             Sensitivity::Public => true,
         }
     }
 }
 
-pub fn normalize(s: &str) -> String {
-    s.split_whitespace()
+pub fn normalize(value: &str) -> String {
+    value
+        .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase()
 }
-pub fn hash_normalized(s: &str) -> String {
-    hex::encode(Sha256::digest(s.as_bytes()))
+
+pub fn hash_normalized(value: &str) -> String {
+    hex::encode(Sha256::digest(value.as_bytes()))
 }
+
 pub fn now_epoch() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
 }
-pub fn lexical_terms(query: &str) -> HashSet<String> {
-    normalize(query)
-        .split_whitespace()
-        .map(str::to_owned)
-        .collect()
-}
-
-pub fn lexical_score_with_terms(terms: &HashSet<String>, memory: &MemoryRecord, now: i64) -> f32 {
-    // Query term sets are tiny in normal recall traffic. Re-scan the borrowed
-    // normalized string instead of allocating a second HashSet for every
-    // candidate memory.
-    let overlap = terms
-        .iter()
-        .filter(|term| {
-            memory
-                .normalized_content
-                .split_whitespace()
-                .any(|word| word == term.as_str())
-        })
-        .count() as f32;
-    let age_days = ((now - memory.updated_at).max(0) as f32) / 86_400.0;
-    let recency = 1.0 / (1.0 + age_days / 30.0);
-    overlap * 1.5
-        + memory.importance * 2.0
-        + memory.confidence
-        + recency
-        + if memory.pinned { 3.0 } else { 0.0 }
-}
-
-pub fn lexical_score(query: &str, memory: &MemoryRecord, now: i64) -> f32 {
-    let terms = lexical_terms(query);
-    lexical_score_with_terms(&terms, memory, now)
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn secret_never_leaves_local() {
         assert!(
@@ -343,10 +361,12 @@ mod tests {
             .allows(Sensitivity::Secret)
         );
     }
+
     #[test]
     fn normalization_is_stable() {
         assert_eq!("hello world", normalize("  Hello   WORLD "));
     }
+
     #[test]
     fn huge_ttl_saturates_instead_of_wrapping() {
         let record = NewMemory {
