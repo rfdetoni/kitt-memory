@@ -76,11 +76,7 @@ pub fn retention_score(memory: &MemoryRecord, now: i64) -> f32 {
     score
 }
 
-pub fn lexical_score_with_terms(
-    terms: &HashSet<String>,
-    memory: &MemoryRecord,
-    now: i64,
-) -> f32 {
+pub fn lexical_score_with_terms(terms: &HashSet<String>, memory: &MemoryRecord, now: i64) -> f32 {
     let overlap = terms
         .iter()
         .filter(|term| {
@@ -131,29 +127,26 @@ pub fn assess_merge_candidate(
     let same_kind = existing.kind == incoming.kind;
     let polarity_changed = negation_mismatch(&existing.content, &incoming.content);
 
-    let (disposition, reason) = if same_kind
-        && !polarity_changed
-        && lexical >= 0.90
-        && blended >= 0.94
-    {
-        (
-            MergeDisposition::Equivalent,
-            "high-confidence same-kind paraphrase",
-        )
-    } else if blended >= 0.70 || lexical >= 0.65 {
-        (
-            MergeDisposition::NeedsReview,
-            if polarity_changed {
-                "similar content with a possible polarity change"
-            } else if !same_kind {
-                "similar content with a different memory kind"
-            } else {
-                "similar content requires consolidation review"
-            },
-        )
-    } else {
-        (MergeDisposition::Distinct, "insufficient similarity")
-    };
+    let (disposition, reason) =
+        if same_kind && !polarity_changed && lexical >= 0.90 && blended >= 0.94 {
+            (
+                MergeDisposition::Equivalent,
+                "high-confidence same-kind paraphrase",
+            )
+        } else if blended >= 0.70 || lexical >= 0.65 {
+            (
+                MergeDisposition::NeedsReview,
+                if polarity_changed {
+                    "similar content with a possible polarity change"
+                } else if !same_kind {
+                    "similar content with a different memory kind"
+                } else {
+                    "similar content requires consolidation review"
+                },
+            )
+        } else {
+            (MergeDisposition::Distinct, "insufficient similarity")
+        };
 
     MergeAssessment {
         disposition,
