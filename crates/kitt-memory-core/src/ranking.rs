@@ -77,15 +77,8 @@ pub fn retention_score(memory: &MemoryRecord, now: i64) -> f32 {
 }
 
 pub fn lexical_score_with_terms(terms: &HashSet<String>, memory: &MemoryRecord, now: i64) -> f32 {
-    let overlap = terms
-        .iter()
-        .filter(|term| {
-            memory
-                .normalized_content
-                .split_whitespace()
-                .any(|word| word == term.as_str())
-        })
-        .count() as f32;
+    let memory_terms = lexical_terms(&memory.normalized_content);
+    let overlap = terms.intersection(&memory_terms).count() as f32;
     overlap * 1.5 + retention_score(memory, now) * 4.0
 }
 
@@ -94,7 +87,10 @@ pub fn lexical_score(query: &str, memory: &MemoryRecord, now: i64) -> f32 {
 }
 
 fn negation_mismatch(left: &str, right: &str) -> bool {
-    const NEGATIONS: [&str; 6] = ["not", "never", "no", "without", "disable", "avoid"];
+    const NEGATIONS: [&str; 15] = [
+        "not", "never", "no", "without", "disable", "avoid", "não", "nao", "nunca",
+        "jamais", "sem", "evite", "evitar", "desabilitar", "ningún",
+    ];
     let l = lexical_terms(left);
     let r = lexical_terms(right);
     NEGATIONS
@@ -119,16 +115,18 @@ pub fn assess_merge_candidate(
     }
 
     let lexical = lexical_similarity(&incoming.content, existing);
-    let semantic = semantic_score.map(|score| score.clamp(0.0, 1.0));
+    let semantic = semantic_score.filter(|score| score.is_finite()).map(|score| score.clamp(0.0, 1.0));
     let blended = match semantic {
         Some(value) => (lexical * 0.45) + (value * 0.55),
         None => lexical,
     };
     let same_kind = existing.kind == incoming.kind;
+    let same_scope = existing.scope == incoming.scope
+        && existing.scope_key.as_deref() == incoming.scope_key.as_deref();
     let polarity_changed = negation_mismatch(&existing.content, &incoming.content);
 
     let (disposition, reason) =
-        if same_kind && !polarity_changed && lexical >= 0.90 && blended >= 0.94 {
+        if same_kind && same_scope && !polarity_changed && lexical >= 0.90 && blended >= 0.94 {
             (
                 MergeDisposition::Equivalent,
                 "high-confidence same-kind paraphrase",
@@ -173,6 +171,7 @@ mod tests {
             status: MemoryStatus::Active,
             sensitivity: Sensitivity::Private,
             scope: MemoryScope::Workspace,
+            scope_key: None,
             importance: 0.8,
             confidence: 0.9,
             created_at: 1,
@@ -208,6 +207,7 @@ mod tests {
             content: "never run tests before commit".into(),
             sensitivity: Sensitivity::Private,
             scope: MemoryScope::Workspace,
+            scope_key: None,
             importance: 0.8,
             confidence: 1.0,
             pinned: false,

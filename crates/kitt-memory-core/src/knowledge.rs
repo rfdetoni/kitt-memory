@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{MemoryError, Result, now_epoch};
+use crate::{MemoryError, Result, Sensitivity, now_epoch};
 
 #[derive(Debug, Clone)]
 pub struct NewCorrection {
@@ -12,6 +12,8 @@ pub struct NewCorrection {
     pub corrected: String,
     pub reason: Option<String>,
     pub source: String,
+    pub sensitivity: Sensitivity,
+    pub source_memory_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +26,8 @@ pub struct CorrectionRecord {
     pub corrected: String,
     pub reason: Option<String>,
     pub source: String,
+    pub sensitivity: Sensitivity,
+    pub source_memory_ids: Vec<String>,
     pub applied_count: u64,
     pub created_at: i64,
     pub updated_at: i64,
@@ -48,11 +52,9 @@ impl NewCorrection {
             predicted,
             corrected,
             reason: self.reason.filter(|value| !value.trim().is_empty()),
-            source: if self.source.trim().is_empty() {
-                "agent".into()
-            } else {
-                self.source.trim().to_string()
-            },
+            source: if self.source.trim().is_empty() { "agent".into() } else { self.source.trim().to_string() },
+            sensitivity: self.sensitivity,
+            source_memory_ids: dedupe(self.source_memory_ids),
             applied_count: 0,
             created_at: now,
             updated_at: now,
@@ -67,6 +69,7 @@ pub struct NewConcept {
     pub name: String,
     pub definition: String,
     pub confidence: f32,
+    pub sensitivity: Sensitivity,
     pub labels: Vec<String>,
     pub source_memory_ids: Vec<String>,
 }
@@ -79,6 +82,7 @@ pub struct StoredConcept {
     pub name: String,
     pub definition: String,
     pub confidence: f32,
+    pub sensitivity: Sensitivity,
     pub revision: u64,
     pub labels: Vec<String>,
     pub source_memory_ids: Vec<String>,
@@ -108,6 +112,7 @@ impl NewConcept {
             name,
             definition,
             confidence: self.confidence,
+            sensitivity: self.sensitivity,
             revision: 1,
             labels: dedupe(self.labels),
             source_memory_ids: dedupe(self.source_memory_ids),
@@ -151,14 +156,15 @@ impl KnowledgeRelation {
         }
     }
 
-    pub fn from_db(value: &str) -> Self {
+    pub fn from_db(value: &str) -> Result<Self> {
         match value {
-            "SUPPORTS" => Self::Supports,
-            "REQUIRES" => Self::Requires,
-            "CONFLICTS" => Self::Conflicts,
-            "REFINES" => Self::Refines,
-            "REPLACES" => Self::Replaces,
-            _ => Self::Related,
+            "SUPPORTS" => Ok(Self::Supports),
+            "REQUIRES" => Ok(Self::Requires),
+            "CONFLICTS" => Ok(Self::Conflicts),
+            "REFINES" => Ok(Self::Refines),
+            "REPLACES" => Ok(Self::Replaces),
+            "RELATED" => Ok(Self::Related),
+            other => Err(MemoryError::Corrupt(format!("unknown knowledge relation: {other}"))),
         }
     }
 }

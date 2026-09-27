@@ -9,7 +9,9 @@ use crate::{
 pub struct BaselineQuery {
     pub namespace: String,
     pub workspace_id: String,
+    pub scope_key: Option<String>,
     pub max_tokens: usize,
+    pub as_of: Option<i64>,
     pub allow_private: bool,
     pub allow_secret: bool,
 }
@@ -33,13 +35,15 @@ pub struct MemoryBaseline {
 }
 
 fn allowed(memory: &MemoryRecord, query: &BaselineQuery, now: i64) -> bool {
-    if memory.status != MemoryStatus::Active
-        || memory.namespace != query.namespace
-        || (memory.workspace_id != query.workspace_id && memory.scope != MemoryScope::Global)
-        || !memory.is_valid_at(now)
-    {
-        return false;
-    }
+    let scope_allowed = match memory.scope {
+        MemoryScope::Global => true,
+        MemoryScope::Workspace => memory.workspace_id == query.workspace_id,
+        MemoryScope::Conversation => query.scope_key.is_some()
+            && memory.workspace_id == query.workspace_id
+            && memory.scope_key.as_deref() == query.scope_key.as_deref(),
+    };
+    if memory.status != MemoryStatus::Active || memory.namespace != query.namespace
+        || !scope_allowed || !memory.is_valid_at(now) { return false; }
     match memory.sensitivity {
         Sensitivity::Secret => query.allow_secret,
         Sensitivity::Private => query.allow_private,
@@ -76,7 +80,7 @@ pub fn build_memory_baseline(
     memories: impl IntoIterator<Item = MemoryRecord>,
     query: &BaselineQuery,
 ) -> MemoryBaseline {
-    let now = now_epoch();
+    let now = query.as_of.unwrap_or_else(now_epoch);
     let max_tokens = query.max_tokens.clamp(32, 16_384);
     let max_chars = max_tokens.saturating_mul(4);
     let per_entry_chars = (max_chars / 3).clamp(120, 1_200);
@@ -119,7 +123,7 @@ pub fn build_memory_baseline(
             .count()
             .saturating_add(label.len())
             .saturating_add(8);
-        if !entries.is_empty() && used_chars.saturating_add(cost) > max_chars {
+        if used_chars.saturating_add(cost) > max_chars {
             continue;
         }
         used_chars = used_chars.saturating_add(cost);
@@ -168,6 +172,7 @@ mod tests {
             status: MemoryStatus::Active,
             sensitivity: Sensitivity::Private,
             scope: MemoryScope::Workspace,
+            scope_key: None,
             importance: 0.8,
             confidence: 1.0,
             created_at: 1,
@@ -195,7 +200,9 @@ mod tests {
             &BaselineQuery {
                 namespace: "agent".into(),
                 workspace_id: "ws".into(),
+                scope_key: None,
                 max_tokens: 80,
+                as_of: None,
                 allow_private: true,
                 allow_secret: false,
             },

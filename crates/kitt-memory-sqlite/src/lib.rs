@@ -5,7 +5,10 @@ use kitt_memory_core::{
     SemanticReranker, Sensitivity, StoredConcept, assess_merge_candidate, build_memory_baseline,
     now_epoch,
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, TransactionBehavior, params,
+    types::Type,
+};
 use std::{
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
     fs::{self, OpenOptions},
@@ -17,8 +20,8 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-const STORE_SCHEMA_VERSION: i64 = 3;
-const MEMORY_COLUMNS: &str = "m.id,m.namespace,m.workspace_id,m.kind,m.content,m.normalized_content,m.status,m.sensitivity,m.scope,m.importance,m.confidence,m.created_at,m.updated_at,m.last_accessed_at,m.access_count,m.valid_from,m.valid_until,m.supersedes_id,m.content_hash,m.pinned,m.metadata_json";
+const STORE_SCHEMA_VERSION: i64 = 4;
+const MEMORY_COLUMNS: &str = "m.id,m.namespace,m.workspace_id,m.kind,m.content,m.normalized_content,m.status,m.sensitivity,m.scope,m.scope_key,m.importance,m.confidence,m.created_at,m.updated_at,m.last_accessed_at,m.access_count,m.valid_from,m.valid_until,m.supersedes_id,m.content_hash,m.pinned,m.metadata_json";
 
 fn ensure_private_database_file(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
@@ -81,8 +84,8 @@ impl SqliteMemoryStore {
             writer: Mutex::new(writer),
         };
         {
-            let conn = store.writer_conn()?;
-            migrate(&conn).map_err(storage)?;
+            let mut conn = store.writer_conn()?;
+            migrate(&mut conn).map_err(storage)?;
         }
         store.prune_expired()?;
         Ok(store)
@@ -93,6 +96,7 @@ impl SqliteMemoryStore {
         conn.busy_timeout(Duration::from_secs(5)).map_err(storage)?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(storage)?;
+        conn.pragma_update(None, "secure_delete", "ON").map_err(storage)?;
         Ok(conn)
     }
 
@@ -139,12 +143,13 @@ impl SqliteMemoryStore {
                     id: row.get(0)?,
                     namespace: "agent-cli".into(),
                     workspace_id: row.get(1)?,
-                    kind: MemoryKind::from_db(&row.get::<_, String>(2)?),
+                    kind: parse_kind_at(row.get::<_, String>(2)?, 2)?,
                     content: row.get(3)?,
                     normalized_content: row.get(4)?,
-                    status: MemoryStatus::from_db(&row.get::<_, String>(5)?),
+                    status: parse_status_at(row.get::<_, String>(5)?, 5)?,
                     sensitivity: Sensitivity::Private,
                     scope: MemoryScope::Workspace,
+                    scope_key: None,
                     importance: row.get::<_, f64>(6)? as f32,
                     confidence: row.get::<_, f64>(7)? as f32,
                     created_at: row.get::<_, f64>(8)? as i64,
@@ -162,11 +167,11 @@ impl SqliteMemoryStore {
             .map_err(storage)?;
 
         let mut count = 0;
-        let mut active_seen: HashMap<(String, String), String> = HashMap::new();
+        let mut active_seen: HashMap<(String, String, String, String, String), String> = HashMap::new();
         for row in rows {
-            let mut memory = row.map_err(storage)?;
+            let mut memory = row.map_err(storage)?.canonicalized_for_storage()?;
             if memory.status == MemoryStatus::Active {
-                let key = (memory.workspace_id.clone(), memory.content_hash.clone());
+                let key = identity_key(&memory);
                 if let Some(keeper) = active_seen.get(&key) {
                     memory.status = MemoryStatus::Superseded;
                     memory.supersedes_id = Some(keeper.clone());
@@ -180,117 +185,53 @@ impl SqliteMemoryStore {
         Ok(count)
     }
 
-    fn load_recall_candidates(
-        &self,
-        query: &RecallQuery,
-        cap: usize,
-    ) -> Result<Vec<(MemoryRecord, f32)>> {
-        let now = now_epoch();
+    fn load_recall_candidates(&self, query: &RecallQuery, cap: usize) -> Result<Vec<(MemoryRecord, f32)>> {
+        if cap == 0 { return Ok(Vec::new()); }
+        let at = query.as_of.unwrap_or_else(now_epoch);
+        let scope_key = query.scope_key.as_deref().unwrap_or("");
         let fts = fts_query(&query.text);
-        let mut rows = if fts.is_empty() {
-            Vec::new()
-        } else {
+        let mut rows = if fts.is_empty() { Vec::new() } else {
             self.with_conn(|conn| {
-                let sql = format!(
-                    "SELECT {MEMORY_COLUMNS}, bm25(memories_fts)                      FROM memories_fts JOIN memories m ON m.rowid=memories_fts.rowid                      WHERE memories_fts MATCH ?1 AND m.namespace=?2                        AND (m.workspace_id=?3 OR m.scope='global')                        AND m.status='ACTIVE'                        AND (m.valid_from IS NULL OR m.valid_from<=?4)                        AND (m.valid_until IS NULL OR m.valid_until>?4)                      ORDER BY bm25(memories_fts) ASC LIMIT ?5"
-                );
-                let mut stmt = conn.prepare(&sql)?;
-                stmt.query_map(
-                    params![fts, query.namespace, query.workspace_id, now, cap as i64],
-                    |row| Ok((map_memory_row(row)?, row.get::<_, f64>(21)? as f32)),
-                )?
-                .collect::<std::result::Result<Vec<_>, _>>()
+                let sql = format!("SELECT {MEMORY_COLUMNS},bm25(memories_fts) FROM memories_fts JOIN memories m ON m.rowid=memories_fts.rowid WHERE memories_fts MATCH ?1 AND m.namespace=?2 AND (m.scope='global' OR (m.workspace_id=?3 AND m.scope='workspace') OR (m.workspace_id=?3 AND m.scope='conversation' AND m.scope_key=?4)) AND m.status='ACTIVE' AND (m.valid_from IS NULL OR m.valid_from<=?5) AND (m.valid_until IS NULL OR m.valid_until>?5) AND m.sensitivity<>'ephemeral' AND (m.sensitivity<>'private' OR ?6=1) AND (m.sensitivity<>'secret' OR ?7=1) ORDER BY bm25(memories_fts) ASC LIMIT ?8");
+                let mut stmt=conn.prepare(&sql)?;
+                stmt.query_map(params![fts,query.namespace,query.workspace_id,scope_key,at,query.allow_private as i64,query.allow_secret as i64,cap as i64],|row| Ok((map_memory_row(row)?,row.get::<_,f64>(22)? as f32)))?.collect::<std::result::Result<Vec<_>,_>>()
             })?
         };
-
-        if rows.len() < cap {
-            let fallback = self.with_conn(|conn| {
-                let sql = format!(
-                    "SELECT {MEMORY_COLUMNS}, 0.0 FROM memories m WHERE m.namespace=?1 AND (m.workspace_id=?2 OR m.scope='global') AND m.status='ACTIVE' AND (m.valid_from IS NULL OR m.valid_from<=?3) AND (m.valid_until IS NULL OR m.valid_until>?3) ORDER BY m.pinned DESC,m.importance DESC,m.updated_at DESC LIMIT ?4"
-                );
-                let mut stmt = conn.prepare(&sql)?;
-                stmt.query_map(
-                    params![query.namespace, query.workspace_id, now, cap as i64],
-                    |row| Ok((map_memory_row(row)?, row.get::<_, f64>(21)? as f32)),
-                )?
-                .collect::<std::result::Result<Vec<_>, _>>()
-            })?;
-            let mut seen = rows
-                .iter()
-                .map(|(memory, _)| memory.id.clone())
-                .collect::<std::collections::HashSet<_>>();
-            for candidate in fallback {
-                if rows.len() >= cap {
-                    break;
-                }
-                if seen.insert(candidate.0.id.clone()) {
-                    rows.push(candidate);
-                }
-            }
-        }
-
-        rows.retain(|(memory, _)| sensitivity_allowed(memory.sensitivity, query));
+        let fallback=self.with_conn(|conn|{
+            let sql=format!("SELECT {MEMORY_COLUMNS},0.0 FROM memories m WHERE m.namespace=?1 AND (m.scope='global' OR (m.workspace_id=?2 AND m.scope='workspace') OR (m.workspace_id=?2 AND m.scope='conversation' AND m.scope_key=?3)) AND m.status='ACTIVE' AND (m.valid_from IS NULL OR m.valid_from<=?4) AND (m.valid_until IS NULL OR m.valid_until>?4) AND m.sensitivity<>'ephemeral' AND (m.sensitivity<>'private' OR ?5=1) AND (m.sensitivity<>'secret' OR ?6=1) ORDER BY m.pinned DESC,m.importance DESC,m.updated_at DESC LIMIT ?7");
+            let mut stmt=conn.prepare(&sql)?;
+            stmt.query_map(params![query.namespace,query.workspace_id,scope_key,at,query.allow_private as i64,query.allow_secret as i64,cap.clamp(1,32) as i64],|row| Ok((map_memory_row(row)?,row.get::<_,f64>(22)? as f32)))?.collect::<std::result::Result<Vec<_>,_>>()
+        })?;
+        let mut seen=rows.iter().map(|(m,_)|m.id.clone()).collect::<HashSet<_>>();
+        for candidate in fallback { if seen.insert(candidate.0.id.clone()) { rows.push(candidate); } }
+        rows.truncate(cap.saturating_add(cap.clamp(1,32)));
         Ok(rows)
     }
 
-    fn ranked_recall(
-        &self,
-        query: &RecallQuery,
-        reranker: Option<&dyn SemanticReranker>,
-        touch: bool,
-    ) -> Result<Vec<MemoryRecord>> {
-        let limit = query.limit.clamp(1, 50);
-        let cap = (limit.saturating_mul(12)).clamp(64, 256);
-        let candidates = self.load_recall_candidates(query, cap)?;
-        if candidates.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let candidate_records = candidates
-            .iter()
-            .map(|(memory, _)| memory.clone())
-            .collect::<Vec<_>>();
-        let semantic_scores = reranker
-            .and_then(|ranker| ranker.score(&query.text, &candidate_records).ok())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|item| (item.memory_id, item.score.clamp(0.0, 1.0)))
-            .collect::<HashMap<_, _>>();
-
-        let now = now_epoch();
-        let semantic_enabled = !semantic_scores.is_empty();
-        let mut ranked = candidates
-            .into_iter()
-            .enumerate()
-            .map(|(index, (memory, _bm25))| {
-                let lexical = kitt_memory_core::lexical_similarity(&query.text, &memory);
-                let retained = kitt_memory_core::retention_score(&memory, now).min(1.25);
-                let retrieval_position = 1.0 / (1.0 + (index as f32 * 0.12));
-                let semantic = semantic_scores.get(&memory.id).copied().unwrap_or(0.0);
-                let score = if semantic_enabled {
-                    lexical * 0.30 + semantic * 0.35 + retained * 0.20 + retrieval_position * 0.15
-                } else {
-                    lexical * 0.48 + retained * 0.32 + retrieval_position * 0.20
-                };
-                (score, memory)
-            })
-            .collect::<Vec<_>>();
-
-        ranked.sort_by(|left, right| {
-            right
-                .0
-                .total_cmp(&left.0)
-                .then_with(|| left.1.id.cmp(&right.1.id))
-        });
-        let selected = ranked
-            .into_iter()
-            .take(limit)
-            .map(|(_, memory)| memory)
-            .collect::<Vec<_>>();
-
-        if touch && !selected.is_empty() {
-            self.touch_access(selected.iter().map(|memory| memory.id.as_str()))?;
-        }
+    fn ranked_recall(&self, query: &RecallQuery, reranker: Option<&dyn SemanticReranker>, touch: bool) -> Result<Vec<MemoryRecord>> {
+        if query.limit == 0 { return Ok(Vec::new()); }
+        let limit=query.limit.min(50);
+        let cap=(limit.saturating_mul(12)).clamp(64,256);
+        let candidates=self.load_recall_candidates(query,cap)?;
+        if candidates.is_empty(){return Ok(Vec::new());}
+        let records=candidates.iter().map(|(m,_)|m.clone()).collect::<Vec<_>>();
+        let ids=records.iter().map(|m|m.id.as_str()).collect::<HashSet<_>>();
+        let semantic_scores=reranker.and_then(|r|r.score(&query.text,&records).ok()).unwrap_or_default().into_iter()
+            .filter(|x|x.score.is_finite()&&ids.contains(x.memory_id.as_str()))
+            .map(|x|(x.memory_id,x.score.clamp(0.0,1.0))).collect::<HashMap<_,_>>();
+        let now=query.as_of.unwrap_or_else(now_epoch);
+        let semantic_enabled=!semantic_scores.is_empty();
+        let mut ranked=candidates.into_iter().enumerate().map(|(index,(memory,_))|{
+            let lexical=kitt_memory_core::lexical_similarity(&query.text,&memory);
+            let retained=kitt_memory_core::retention_score(&memory,now).min(1.25);
+            let rr=60.0/(61.0+index as f32);
+            let semantic=semantic_scores.get(&memory.id).copied().unwrap_or(0.0);
+            let score=if semantic_enabled{lexical*0.30+semantic*0.35+retained*0.20+rr*0.15}else{lexical*0.48+retained*0.32+rr*0.20};
+            (score,memory)
+        }).collect::<Vec<_>>();
+        ranked.sort_by(|l,r|r.0.total_cmp(&l.0).then_with(||l.1.id.cmp(&r.1.id)));
+        let selected=ranked.into_iter().take(limit).map(|(_,m)|m).collect::<Vec<_>>();
+        if touch && !selected.is_empty() && query.as_of.is_none(){self.touch_access(selected.iter().map(|m|m.id.as_str()))?;}
         Ok(selected)
     }
 
@@ -440,6 +381,7 @@ impl MemoryStore for SqliteMemoryStore {
         let recall = RecallQuery {
             namespace: memory.namespace.clone(),
             workspace_id: memory.workspace_id.clone(),
+            scope_key: None,
             text: memory.content.clone(),
             limit: limit.clamp(1, 32),
             allow_private: true,
@@ -1195,6 +1137,7 @@ mod tests {
             content: content.into(),
             sensitivity,
             scope: MemoryScope::Global,
+            scope_key: None,
             importance: 0.8,
             confidence: 1.0,
             pinned,
@@ -1255,8 +1198,10 @@ mod tests {
             .recall(&RecallQuery {
                 namespace: "assistant".into(),
                 workspace_id: "global".into(),
+                scope_key: None,
                 text: "billing PostgreSQL".into(),
                 limit: 1,
+                as_of: None,
                 allow_private: true,
                 allow_secret: false,
             })
@@ -1279,8 +1224,10 @@ mod tests {
         let query = RecallQuery {
             namespace: "assistant".into(),
             workspace_id: "global".into(),
+            scope_key: None,
             text: "alpha rule".into(),
             limit: 2,
+            as_of: None,
             allow_private: true,
             allow_secret: false,
         };
@@ -1323,7 +1270,9 @@ mod tests {
             .baseline(&BaselineQuery {
                 namespace: "assistant".into(),
                 workspace_id: "global".into(),
+                scope_key: None,
                 max_tokens: 64,
+                as_of: None,
                 allow_private: true,
                 allow_secret: false,
             })
@@ -1443,8 +1392,10 @@ mod tests {
             .recall(&RecallQuery {
                 namespace: "assistant".into(),
                 workspace_id: "global".into(),
+                scope_key: None,
                 text: "migration fact".into(),
                 limit: 5,
+                as_of: None,
                 allow_private: true,
                 allow_secret: true,
             })
@@ -1467,8 +1418,10 @@ mod tests {
         let query = RecallQuery {
             namespace: "assistant".into(),
             workspace_id: "global".into(),
+            scope_key: None,
             text: "future architecture".into(),
             limit: 5,
+            as_of: None,
             allow_private: true,
             allow_secret: false,
         };
