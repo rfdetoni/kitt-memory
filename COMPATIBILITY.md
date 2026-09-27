@@ -2,7 +2,7 @@
 
 The shared engine is intentionally evolutionary, not a rewrite of `kitt-agent-cli` memory.
 
-| Agent CLI concept | Shared engine v0.1 |
+| Agent CLI concept | Shared engine 0.2.x |
 |---|---|
 | `workspace_id` | preserved |
 | memory kind | preserved; Assistant adds episodic/personal/routine kinds |
@@ -15,7 +15,7 @@ The shared engine is intentionally evolutionary, not a rewrite of `kitt-agent-cl
 | content hash | preserved/imported |
 | pinned | preserved |
 | metadata JSON | preserved |
-| evidence provenance | remains authoritative in Agent CLI during v0.1 migration |
+| evidence provenance | remains authoritative in Agent CLI during 0.2.x migration |
 | Dream runs/plans | remain authoritative in Agent CLI; shared memory only exposes product-neutral consolidation candidates |
 | deterministic prompt baseline | shared engine now exposes token-bounded baseline snapshots |
 | hybrid retrieval | FTS5 + retention ranking in shared engine, optional semantic reranker port |
@@ -24,6 +24,12 @@ The shared engine is intentionally evolutionary, not a rewrite of `kitt-agent-cl
 | namespace | new (`agent-cli`, `assistant`, future products) |
 | sensitivity | new (`public`, `personal`, `private`, `secret`, `ephemeral`) |
 | scope | `global`, `workspace`, `conversation`; conversation requires `scope_key` from v0.2 |
+
+## Authority and interoperability in 0.2.x
+
+`kitt-memory` is the reusable structured memory data plane. Product integrations must not treat daemon availability as a switch between unrelated authorities. Agent-originated durable records remain visible from the Agent's structured store and may be mirrored into the shared store; shared recall is an additional source that is merged by the Agent. Human-readable Markdown is a recovery/projection format, not a competing structured authority.
+
+Clearing Agent project memory archives the Agent-owned structured records and best-effort deletes exact workspace-scoped shared mirrors. This keeps temporary daemon outages or restarts from resurrecting memories that the Agent has already cleared locally.
 
 ## Why advanced Dreaming is not rewritten yet
 
