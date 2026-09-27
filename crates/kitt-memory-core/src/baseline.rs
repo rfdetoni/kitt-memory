@@ -38,12 +38,19 @@ fn allowed(memory: &MemoryRecord, query: &BaselineQuery, now: i64) -> bool {
     let scope_allowed = match memory.scope {
         MemoryScope::Global => true,
         MemoryScope::Workspace => memory.workspace_id == query.workspace_id,
-        MemoryScope::Conversation => query.scope_key.is_some()
-            && memory.workspace_id == query.workspace_id
-            && memory.scope_key.as_deref() == query.scope_key.as_deref(),
+        MemoryScope::Conversation => {
+            query.scope_key.is_some()
+                && memory.workspace_id == query.workspace_id
+                && memory.scope_key.as_deref() == query.scope_key.as_deref()
+        }
     };
-    if memory.status != MemoryStatus::Active || memory.namespace != query.namespace
-        || !scope_allowed || !memory.is_valid_at(now) { return false; }
+    if memory.status != MemoryStatus::Active
+        || memory.namespace != query.namespace
+        || !scope_allowed
+        || !memory.is_valid_at(now)
+    {
+        return false;
+    }
     match memory.sensitivity {
         Sensitivity::Secret => query.allow_secret,
         Sensitivity::Private => query.allow_private,

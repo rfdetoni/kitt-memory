@@ -76,7 +76,9 @@ impl MemoryKind {
             "EPISODIC" => Ok(Self::Episodic),
             "PERSONAL_FACT" => Ok(Self::PersonalFact),
             "ROUTINE" => Ok(Self::Routine),
-            other => Err(MemoryError::Corrupt(format!("unknown memory kind: {other}"))),
+            other => Err(MemoryError::Corrupt(format!(
+                "unknown memory kind: {other}"
+            ))),
         }
     }
 }
@@ -109,7 +111,9 @@ impl Sensitivity {
             "private" => Ok(Self::Private),
             "secret" => Ok(Self::Secret),
             "ephemeral" => Ok(Self::Ephemeral),
-            other => Err(MemoryError::Corrupt(format!("unknown sensitivity: {other}"))),
+            other => Err(MemoryError::Corrupt(format!(
+                "unknown sensitivity: {other}"
+            ))),
         }
     }
 
@@ -154,7 +158,9 @@ impl MemoryScope {
             "global" => Ok(Self::Global),
             "workspace" => Ok(Self::Workspace),
             "conversation" => Ok(Self::Conversation),
-            other => Err(MemoryError::Corrupt(format!("unknown memory scope: {other}"))),
+            other => Err(MemoryError::Corrupt(format!(
+                "unknown memory scope: {other}"
+            ))),
         }
     }
 
@@ -185,7 +191,9 @@ impl MemoryStatus {
             "ACTIVE" => Ok(Self::Active),
             "SUPERSEDED" => Ok(Self::Superseded),
             "ARCHIVED" => Ok(Self::Archived),
-            other => Err(MemoryError::Corrupt(format!("unknown memory status: {other}"))),
+            other => Err(MemoryError::Corrupt(format!(
+                "unknown memory status: {other}"
+            ))),
         }
     }
 }
@@ -229,22 +237,42 @@ impl MemoryRecord {
         record.namespace = record.namespace.trim().to_string();
         record.workspace_id = record.workspace_id.trim().to_string();
         record.content = record.content.trim().to_string();
-        record.scope_key = record.scope_key.as_deref().map(str::trim)
-            .filter(|value| !value.is_empty()).map(str::to_string);
+        record.scope_key = record
+            .scope_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
         validate_identity(&record.namespace, &record.workspace_id)?;
         validate_scores(record.importance, record.confidence)?;
         validate_metadata(&record.metadata_json)?;
-        if record.content.is_empty() { return Err(MemoryError::Invalid("content is empty".into())); }
-        if record.scope.requires_scope_key() && record.scope_key.is_none() {
-            return Err(MemoryError::Invalid("conversation memories require scope_key".into()));
+        if record.content.is_empty() {
+            return Err(MemoryError::Invalid("content is empty".into()));
         }
-        if record.scope != MemoryScope::Conversation { record.scope_key = None; }
-        if record.scope == MemoryScope::Global { record.workspace_id = "global".into(); }
-        if record.valid_from.zip(record.valid_until).is_some_and(|(from, until)| until < from) {
-            return Err(MemoryError::Invalid("valid_until cannot be before valid_from".into()));
+        if record.scope.requires_scope_key() && record.scope_key.is_none() {
+            return Err(MemoryError::Invalid(
+                "conversation memories require scope_key".into(),
+            ));
+        }
+        if record.scope != MemoryScope::Conversation {
+            record.scope_key = None;
+        }
+        if record.scope == MemoryScope::Global {
+            record.workspace_id = "global".into();
+        }
+        if record
+            .valid_from
+            .zip(record.valid_until)
+            .is_some_and(|(from, until)| until < from)
+        {
+            return Err(MemoryError::Invalid(
+                "valid_until cannot be before valid_from".into(),
+            ));
         }
         if record.access_count > i64::MAX as u64 {
-            return Err(MemoryError::Invalid("access_count exceeds SQLite range".into()));
+            return Err(MemoryError::Invalid(
+                "access_count exceeds SQLite range".into(),
+            ));
         }
         record.normalized_content = normalize(&record.content);
         record.content_hash = hash_normalized(&record.normalized_content);
@@ -289,12 +317,15 @@ impl NewMemory {
             last_accessed_at: None,
             access_count: 0,
             valid_from: Some(now),
-            valid_until: self.ttl_seconds.map(|ttl| now.saturating_add(i64::try_from(ttl).unwrap_or(i64::MAX))),
+            valid_until: self
+                .ttl_seconds
+                .map(|ttl| now.saturating_add(i64::try_from(ttl).unwrap_or(i64::MAX))),
             supersedes_id: None,
             content_hash: String::new(),
             pinned: self.pinned,
             metadata_json: self.metadata_json,
-        }.canonicalized_for_storage()
+        }
+        .canonicalized_for_storage()
     }
 }
 
@@ -383,15 +414,24 @@ pub fn normalize(value: &str) -> String {
 }
 
 fn validate_identity(namespace: &str, workspace_id: &str) -> Result<()> {
-    if namespace.is_empty() { return Err(MemoryError::Invalid("namespace is empty".into())); }
-    if workspace_id.is_empty() { return Err(MemoryError::Invalid("workspace_id is empty".into())); }
+    if namespace.is_empty() {
+        return Err(MemoryError::Invalid("namespace is empty".into()));
+    }
+    if workspace_id.is_empty() {
+        return Err(MemoryError::Invalid("workspace_id is empty".into()));
+    }
     Ok(())
 }
 
 fn validate_scores(importance: f32, confidence: f32) -> Result<()> {
-    if !importance.is_finite() || !confidence.is_finite()
-        || !(0.0..=1.0).contains(&importance) || !(0.0..=1.0).contains(&confidence) {
-        return Err(MemoryError::Invalid("importance/confidence must be finite values in 0..1".into()));
+    if !importance.is_finite()
+        || !confidence.is_finite()
+        || !(0.0..=1.0).contains(&importance)
+        || !(0.0..=1.0).contains(&confidence)
+    {
+        return Err(MemoryError::Invalid(
+            "importance/confidence must be finite values in 0..1".into(),
+        ));
     }
     Ok(())
 }
@@ -399,7 +439,11 @@ fn validate_scores(importance: f32, confidence: f32) -> Result<()> {
 fn validate_metadata(metadata_json: &str) -> Result<()> {
     let value: serde_json::Value = serde_json::from_str(metadata_json)
         .map_err(|error| MemoryError::Invalid(format!("metadata_json is invalid: {error}")))?;
-    if !value.is_object() { return Err(MemoryError::Invalid("metadata_json must be a JSON object".into())); }
+    if !value.is_object() {
+        return Err(MemoryError::Invalid(
+            "metadata_json must be a JSON object".into(),
+        ));
+    }
     Ok(())
 }
 

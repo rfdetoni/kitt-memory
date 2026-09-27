@@ -507,29 +507,51 @@ fn test_migration_from_anonymized_agent_cli_db() {
     let _ = std::fs::remove_file(&dest_path);
 }
 
-
 #[test]
 fn conversation_scope_is_isolated() {
     let db = temp_db_path("conversation-scope");
     let store = SqliteMemoryStore::open(&db).unwrap();
-    store.remember(NewMemory {
-        namespace: "agent-cli".into(), workspace_id: "ws".into(),
-        kind: MemoryKind::Episodic, content: "conversation alpha only".into(),
-        sensitivity: Sensitivity::Private, scope: MemoryScope::Conversation,
-        scope_key: Some("alpha".into()), importance: 0.5, confidence: 1.0,
-        pinned: false, ttl_seconds: None, metadata_json: "{}".into(),
-    }).unwrap();
-    let beta = store.recall(&RecallQuery {
-        namespace: "agent-cli".into(), workspace_id: "ws".into(), scope_key: Some("beta".into()),
-        text: "conversation alpha".into(), limit: 10, as_of: None,
-        allow_private: true, allow_secret: false,
-    }).unwrap();
+    store
+        .remember(NewMemory {
+            namespace: "agent-cli".into(),
+            workspace_id: "ws".into(),
+            kind: MemoryKind::Episodic,
+            content: "conversation alpha only".into(),
+            sensitivity: Sensitivity::Private,
+            scope: MemoryScope::Conversation,
+            scope_key: Some("alpha".into()),
+            importance: 0.5,
+            confidence: 1.0,
+            pinned: false,
+            ttl_seconds: None,
+            metadata_json: "{}".into(),
+        })
+        .unwrap();
+    let beta = store
+        .recall(&RecallQuery {
+            namespace: "agent-cli".into(),
+            workspace_id: "ws".into(),
+            scope_key: Some("beta".into()),
+            text: "conversation alpha".into(),
+            limit: 10,
+            as_of: None,
+            allow_private: true,
+            allow_secret: false,
+        })
+        .unwrap();
     assert!(beta.is_empty());
-    let alpha = store.recall(&RecallQuery {
-        namespace: "agent-cli".into(), workspace_id: "ws".into(), scope_key: Some("alpha".into()),
-        text: "conversation alpha".into(), limit: 10, as_of: None,
-        allow_private: true, allow_secret: false,
-    }).unwrap();
+    let alpha = store
+        .recall(&RecallQuery {
+            namespace: "agent-cli".into(),
+            workspace_id: "ws".into(),
+            scope_key: Some("alpha".into()),
+            text: "conversation alpha".into(),
+            limit: 10,
+            as_of: None,
+            allow_private: true,
+            allow_secret: false,
+        })
+        .unwrap();
     assert_eq!(alpha.len(), 1);
     let _ = std::fs::remove_file(&db);
 }
@@ -539,32 +561,73 @@ fn independent_stores_never_downgrade_sensitivity() {
     let db = temp_db_path("multi-store-sensitivity");
     let a = SqliteMemoryStore::open(&db).unwrap();
     let b = SqliteMemoryStore::open(&db).unwrap();
-    let base = a.remember(NewMemory {
-        namespace: "agent-cli".into(), workspace_id: "ws".into(),
-        kind: MemoryKind::ProjectRule, content: "shared invariant".into(),
-        sensitivity: Sensitivity::Public, scope: MemoryScope::Workspace, scope_key: None,
-        importance: 0.5, confidence: 1.0, pinned: false, ttl_seconds: None, metadata_json: "{}".into(),
-    }).unwrap();
-    let first = std::thread::spawn(move || a.remember(NewMemory {
-        namespace: "agent-cli".into(), workspace_id: "ws".into(),
-        kind: MemoryKind::ProjectRule, content: "shared invariant".into(),
-        sensitivity: Sensitivity::Secret, scope: MemoryScope::Workspace, scope_key: None,
-        importance: 0.5, confidence: 1.0, pinned: false, ttl_seconds: None, metadata_json: "{}".into(),
-    }).unwrap());
-    let second = std::thread::spawn(move || b.remember(NewMemory {
-        namespace: "agent-cli".into(), workspace_id: "ws".into(),
-        kind: MemoryKind::ProjectRule, content: "shared invariant".into(),
-        sensitivity: Sensitivity::Personal, scope: MemoryScope::Workspace, scope_key: None,
-        importance: 0.5, confidence: 1.0, pinned: false, ttl_seconds: None, metadata_json: "{}".into(),
-    }).unwrap());
-    first.join().unwrap(); second.join().unwrap();
+    let base = a
+        .remember(NewMemory {
+            namespace: "agent-cli".into(),
+            workspace_id: "ws".into(),
+            kind: MemoryKind::ProjectRule,
+            content: "shared invariant".into(),
+            sensitivity: Sensitivity::Public,
+            scope: MemoryScope::Workspace,
+            scope_key: None,
+            importance: 0.5,
+            confidence: 1.0,
+            pinned: false,
+            ttl_seconds: None,
+            metadata_json: "{}".into(),
+        })
+        .unwrap();
+    let first = std::thread::spawn(move || {
+        a.remember(NewMemory {
+            namespace: "agent-cli".into(),
+            workspace_id: "ws".into(),
+            kind: MemoryKind::ProjectRule,
+            content: "shared invariant".into(),
+            sensitivity: Sensitivity::Secret,
+            scope: MemoryScope::Workspace,
+            scope_key: None,
+            importance: 0.5,
+            confidence: 1.0,
+            pinned: false,
+            ttl_seconds: None,
+            metadata_json: "{}".into(),
+        })
+        .unwrap()
+    });
+    let second = std::thread::spawn(move || {
+        b.remember(NewMemory {
+            namespace: "agent-cli".into(),
+            workspace_id: "ws".into(),
+            kind: MemoryKind::ProjectRule,
+            content: "shared invariant".into(),
+            sensitivity: Sensitivity::Personal,
+            scope: MemoryScope::Workspace,
+            scope_key: None,
+            importance: 0.5,
+            confidence: 1.0,
+            pinned: false,
+            ttl_seconds: None,
+            metadata_json: "{}".into(),
+        })
+        .unwrap()
+    });
+    first.join().unwrap();
+    second.join().unwrap();
     let verify = SqliteMemoryStore::open(&db).unwrap();
-    let rows = verify.recall(&RecallQuery {
-        namespace: "agent-cli".into(), workspace_id: "ws".into(), scope_key: None,
-        text: "shared invariant".into(), limit: 5, as_of: None,
-        allow_private: true, allow_secret: true,
-    }).unwrap();
-    assert_eq!(rows.len(), 1); assert_eq!(rows[0].id, base.id);
+    let rows = verify
+        .recall(&RecallQuery {
+            namespace: "agent-cli".into(),
+            workspace_id: "ws".into(),
+            scope_key: None,
+            text: "shared invariant".into(),
+            limit: 5,
+            as_of: None,
+            allow_private: true,
+            allow_secret: true,
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, base.id);
     assert_eq!(rows[0].sensitivity, Sensitivity::Secret);
     let _ = std::fs::remove_file(&db);
 }
@@ -573,20 +636,36 @@ fn independent_stores_never_downgrade_sensitivity() {
 fn historical_recall_is_side_effect_free_and_zero_limit_is_empty() {
     let db = temp_db_path("historical");
     let store = SqliteMemoryStore::open(&db).unwrap();
-    let memory = store.remember(NewMemory {
-        namespace: "agent-cli".into(), workspace_id: "ws".into(),
-        kind: MemoryKind::TechnicalFact, content: "historical fact".into(),
-        sensitivity: Sensitivity::Private, scope: MemoryScope::Workspace, scope_key: None,
-        importance: 0.8, confidence: 1.0, pinned: false, ttl_seconds: None, metadata_json: "{}".into(),
-    }).unwrap();
+    let memory = store
+        .remember(NewMemory {
+            namespace: "agent-cli".into(),
+            workspace_id: "ws".into(),
+            kind: MemoryKind::TechnicalFact,
+            content: "historical fact".into(),
+            sensitivity: Sensitivity::Private,
+            scope: MemoryScope::Workspace,
+            scope_key: None,
+            importance: 0.8,
+            confidence: 1.0,
+            pinned: false,
+            ttl_seconds: None,
+            metadata_json: "{}".into(),
+        })
+        .unwrap();
     let historical = RecallQuery {
-        namespace: "agent-cli".into(), workspace_id: "ws".into(), scope_key: None,
-        text: "historical fact".into(), limit: 5, as_of: Some(memory.created_at),
-        allow_private: true, allow_secret: false,
+        namespace: "agent-cli".into(),
+        workspace_id: "ws".into(),
+        scope_key: None,
+        text: "historical fact".into(),
+        limit: 5,
+        as_of: Some(memory.created_at),
+        allow_private: true,
+        allow_secret: false,
     };
     assert_eq!(store.recall(&historical).unwrap()[0].access_count, 0);
     assert_eq!(store.recall(&historical).unwrap()[0].access_count, 0);
-    let mut zero = historical; zero.limit = 0;
+    let mut zero = historical;
+    zero.limit = 0;
     assert!(store.recall(&zero).unwrap().is_empty());
     let _ = std::fs::remove_file(&db);
 }
@@ -595,16 +674,38 @@ fn historical_recall_is_side_effect_free_and_zero_limit_is_empty() {
 fn distinct_kinds_and_scopes_do_not_exact_merge() {
     let db = temp_db_path("identity");
     let store = SqliteMemoryStore::open(&db).unwrap();
-    let a = store.remember(NewMemory {
-        namespace: "agent-cli".into(), workspace_id: "ws".into(), kind: MemoryKind::ProjectRule,
-        content: "same text".into(), sensitivity: Sensitivity::Private, scope: MemoryScope::Workspace,
-        scope_key: None, importance: 0.5, confidence: 1.0, pinned: false, ttl_seconds: None, metadata_json: "{}".into(),
-    }).unwrap();
-    let b = store.remember(NewMemory {
-        namespace: "agent-cli".into(), workspace_id: "ws".into(), kind: MemoryKind::TechnicalFact,
-        content: "same text".into(), sensitivity: Sensitivity::Private, scope: MemoryScope::Workspace,
-        scope_key: None, importance: 0.5, confidence: 1.0, pinned: false, ttl_seconds: None, metadata_json: "{}".into(),
-    }).unwrap();
+    let a = store
+        .remember(NewMemory {
+            namespace: "agent-cli".into(),
+            workspace_id: "ws".into(),
+            kind: MemoryKind::ProjectRule,
+            content: "same text".into(),
+            sensitivity: Sensitivity::Private,
+            scope: MemoryScope::Workspace,
+            scope_key: None,
+            importance: 0.5,
+            confidence: 1.0,
+            pinned: false,
+            ttl_seconds: None,
+            metadata_json: "{}".into(),
+        })
+        .unwrap();
+    let b = store
+        .remember(NewMemory {
+            namespace: "agent-cli".into(),
+            workspace_id: "ws".into(),
+            kind: MemoryKind::TechnicalFact,
+            content: "same text".into(),
+            sensitivity: Sensitivity::Private,
+            scope: MemoryScope::Workspace,
+            scope_key: None,
+            importance: 0.5,
+            confidence: 1.0,
+            pinned: false,
+            ttl_seconds: None,
+            metadata_json: "{}".into(),
+        })
+        .unwrap();
     assert_ne!(a.id, b.id);
     let _ = std::fs::remove_file(&db);
 }

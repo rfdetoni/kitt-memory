@@ -52,7 +52,11 @@ impl NewCorrection {
             predicted,
             corrected,
             reason: self.reason.filter(|value| !value.trim().is_empty()),
-            source: if self.source.trim().is_empty() { "agent".into() } else { self.source.trim().to_string() },
+            source: if self.source.trim().is_empty() {
+                "agent".into()
+            } else {
+                self.source.trim().to_string()
+            },
             sensitivity: self.sensitivity,
             source_memory_ids: dedupe(self.source_memory_ids),
             applied_count: 0,
@@ -164,7 +168,9 @@ impl KnowledgeRelation {
             "REFINES" => Ok(Self::Refines),
             "REPLACES" => Ok(Self::Replaces),
             "RELATED" => Ok(Self::Related),
-            other => Err(MemoryError::Corrupt(format!("unknown knowledge relation: {other}"))),
+            other => Err(MemoryError::Corrupt(format!(
+                "unknown knowledge relation: {other}"
+            ))),
         }
     }
 }

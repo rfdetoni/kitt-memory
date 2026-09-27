@@ -88,8 +88,21 @@ pub fn lexical_score(query: &str, memory: &MemoryRecord, now: i64) -> f32 {
 
 fn negation_mismatch(left: &str, right: &str) -> bool {
     const NEGATIONS: [&str; 15] = [
-        "not", "never", "no", "without", "disable", "avoid", "não", "nao", "nunca",
-        "jamais", "sem", "evite", "evitar", "desabilitar", "ningún",
+        "not",
+        "never",
+        "no",
+        "without",
+        "disable",
+        "avoid",
+        "não",
+        "nao",
+        "nunca",
+        "jamais",
+        "sem",
+        "evite",
+        "evitar",
+        "desabilitar",
+        "ningún",
     ];
     let l = lexical_terms(left);
     let r = lexical_terms(right);
@@ -115,7 +128,9 @@ pub fn assess_merge_candidate(
     }
 
     let lexical = lexical_similarity(&incoming.content, existing);
-    let semantic = semantic_score.filter(|score| score.is_finite()).map(|score| score.clamp(0.0, 1.0));
+    let semantic = semantic_score
+        .filter(|score| score.is_finite())
+        .map(|score| score.clamp(0.0, 1.0));
     let blended = match semantic {
         Some(value) => (lexical * 0.45) + (value * 0.55),
         None => lexical,
