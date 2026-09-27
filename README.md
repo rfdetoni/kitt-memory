@@ -220,3 +220,10 @@ MIT. See [LICENSE](LICENSE).
 Schema v4 makes conversation isolation explicit through `scope_key`, canonicalizes new global memories to the global scope, rejects unknown persisted enum values instead of silently coercing them, and applies sensitivity filtering before candidate limits. `RecallQuery::as_of` enables historical retrieval without mutating access telemetry.
 
 Corrections and concepts retain sensitivity and source-memory provenance. Derived knowledge should inherit the most restrictive sensitivity of its inputs.
+
+
+## 0.2.1 integration contract
+
+Version 0.2.1 clarifies the ecosystem authority boundary without changing schema v4: `kitt-memory` is the shared structured data plane, while a consuming product remains responsible for its own durable product-originated state. Consumers must merge shared recall with their local authoritative records rather than switching authorities based on daemon availability. Markdown projections/recovery files are not structured memory authorities.
+
+For Agent CLI 0.74.4+, Agent-originated project memories are committed to the Agent structured store first and mirrored to `kitt-memory` when the resident service is available. This makes shared-memory availability additive and prevents reconnects from hiding locally durable knowledge.
