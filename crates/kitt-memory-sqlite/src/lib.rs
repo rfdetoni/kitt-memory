@@ -197,14 +197,13 @@ impl SqliteMemoryStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage)?;
         for mut memory in imported {
-            if memory.status == MemoryStatus::Active {
-                if let Some(existing_id) = find_identity_id(&tx, &memory)? {
-                    if existing_id != memory.id {
-                        memory.status = MemoryStatus::Superseded;
-                        memory.supersedes_id = Some(existing_id);
-                        memory.valid_until = close_validity(memory.valid_until, now_epoch());
-                    }
-                }
+            if memory.status == MemoryStatus::Active
+                && let Some(existing_id) = find_identity_id(&tx, &memory)?
+                && existing_id != memory.id
+            {
+                memory.status = MemoryStatus::Superseded;
+                memory.supersedes_id = Some(existing_id);
+                memory.valid_until = close_validity(memory.valid_until, now_epoch());
             }
             upsert_record_tx(&tx, &memory)?;
         }
@@ -396,14 +395,13 @@ impl MemoryStore for SqliteMemoryStore {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage)?;
-        if memory.status == MemoryStatus::Active {
-            if let Some(existing_id) = find_identity_id(&tx, &memory)? {
-                if existing_id != memory.id {
-                    return Err(MemoryError::Invalid(format!(
-                        "active memory identity conflicts with {existing_id}"
-                    )));
-                }
-            }
+        if memory.status == MemoryStatus::Active
+            && let Some(existing_id) = find_identity_id(&tx, &memory)?
+            && existing_id != memory.id
+        {
+            return Err(MemoryError::Invalid(format!(
+                "active memory identity conflicts with {existing_id}"
+            )));
         }
         upsert_record_tx(&tx, &memory)?;
         tx.commit().map_err(storage)?;
