@@ -2,7 +2,7 @@
 
 <p align="center">
   <strong>Persistent local memory engine for the K.I.T.T. ecosystem.</strong><br>
-  Rust · SQLite WAL/FTS5 · hybrid-ready retrieval · deterministic baselines · privacy-aware egress
+  Rust · SQLite WAL/FTS5 · scope-isolated hybrid retrieval · deterministic baselines · privacy-aware egress
 </p>
 
 <p align="center">
@@ -25,9 +25,9 @@ K.I.T.T. Memory is the shared persistent memory data plane used across the ecosy
 - Deterministic, token-bounded memory baselines with explicit budget pressure and dropped-entry counts.
 - Shared correction ledger for learning from prior mistakes.
 - Shared concepts and weighted typed knowledge links without coupling the memory crate to Agent session semantics.
-- Temporal memory validity with `valid_from` / `valid_until` and validity-closing supersession.
+- Temporal memory validity with `valid_from` / `valid_until`, point-in-time recall and validity-closing supersession.
 - Bounded concept-neighborhood expansion (up to four hops) for graph-aware retrieval.
-- Workspace and namespace scoping.
+- Namespace, global/workspace and conversation scoping with explicit `scope_key` isolation.
 - Sensitivity levels: `public`, `personal`, `private`, `secret`, `ephemeral`.
 - Monotonic sensitivity enforcement on upsert, import and deduplication.
 - TTL/expiry pruning.
@@ -95,6 +95,7 @@ store.remember(NewMemory {
     content: "Always run tests before committing".into(),
     sensitivity: Sensitivity::Private,
     scope: MemoryScope::Workspace,
+    scope_key: None,
     importance: 0.9,
     confidence: 1.0,
     pinned: true,
@@ -105,8 +106,10 @@ store.remember(NewMemory {
 let results = store.recall(&RecallQuery {
     namespace: "agent-cli".into(),
     workspace_id: "my-project".into(),
+    scope_key: None,
     text: "tests committing".into(),
     limit: 5,
+    as_of: None,
     allow_private: true,
     allow_secret: false,
 })?;
@@ -114,7 +117,9 @@ let results = store.recall(&RecallQuery {
 let baseline = store.baseline(&kitt_memory_core::BaselineQuery {
     namespace: "agent-cli".into(),
     workspace_id: "my-project".into(),
+    scope_key: None,
     max_tokens: 500,
+    as_of: None,
     allow_private: true,
     allow_secret: false,
 })?;
@@ -140,15 +145,15 @@ Migration is intended to be idempotent and uses the same deduplication and sensi
 
 The engine is optimized for a local, persistent workload rather than an external vector-database dependency:
 
-- WAL supports concurrent readers while writes remain coordinated.
-- Exact hashes prevent duplicate-row inflation; non-exact similarity is surfaced for review instead of being merged blindly.
+- WAL supports concurrent readers while `IMMEDIATE` write transactions enforce cross-process invariants.
+- Exact hashes are deduplicated within namespace + scope + scope key + kind; non-exact similarity is surfaced for review instead of being merged blindly.
 - FTS5 narrows lexical candidates before scoring, with bounded high-salience fallback candidates to preserve durable rules.
 - Retention ranking combines importance, confidence, freshness, access frequency and pinned state.
 - Temporal predicates are applied before ranking, backed by a dedicated temporal lookup index.
 - Concept search can expand through a bounded, cycle-safe knowledge neighborhood after FTS seed selection.
 - Optional semantic scoring reranks only the bounded candidate set; it is not a storage dependency.
 - Baseline generation is deterministic and token-bounded, which helps stable prompt prefixes and exposes memory pressure instead of silently hiding it.
-- Expired rows can be pruned instead of remaining permanent context baggage.
+- Access-only updates do not rebuild FTS rows; graph expansion batches each frontier instead of opening per-node connections. Expired rows can be pruned.
 
 This keeps memory useful to the Agent without making memory retrieval itself a network dependency.
 
@@ -208,3 +213,10 @@ MIT. See [LICENSE](LICENSE).
 `KnowledgeStore` provides product-neutral corrections, concepts and links. These are intentionally independent from Agent conversation/history tables. The Agent can keep session evidence and Dreaming orchestration in its own repository while gradually moving durable reusable knowledge into the shared memory data plane.
 
 `search_concept_neighborhood` combines FTS concept seeds with bounded graph expansion. The default expansion is cycle-safe, scoped to the same namespace/workspace, capped at four hops and one hundred concepts, and does not introduce a graph-database dependency.
+
+
+## v0.2 storage contract
+
+Schema v4 makes conversation isolation explicit through `scope_key`, canonicalizes new global memories to the global scope, rejects unknown persisted enum values instead of silently coercing them, and applies sensitivity filtering before candidate limits. `RecallQuery::as_of` enables historical retrieval without mutating access telemetry.
+
+Corrections and concepts retain sensitivity and source-memory provenance. Derived knowledge should inherit the most restrictive sensitivity of its inputs.

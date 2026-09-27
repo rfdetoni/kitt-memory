@@ -23,7 +23,7 @@ The shared engine is intentionally evolutionary, not a rewrite of `kitt-agent-cl
 | concepts/links | shared product-neutral knowledge contracts plus bounded neighborhood expansion; session evidence remains Agent-owned |
 | namespace | new (`agent-cli`, `assistant`, future products) |
 | sensitivity | new (`public`, `personal`, `private`, `secret`, `ephemeral`) |
-| scope | new (`global`, `workspace`, `conversation`) |
+| scope | `global`, `workspace`, `conversation`; conversation requires `scope_key` from v0.2 |
 
 ## Why advanced Dreaming is not rewritten yet
 
@@ -39,3 +39,8 @@ The shared store now preserves the Agent's `valid_from` semantics, enforces temp
 The shared engine now contains the reusable pieces that previously only existed in the Agent's richer local memory layer: bounded hybrid-ready recall, durable baseline construction, correction records and knowledge concepts/links. This does **not** move Agent session evidence, Dream scheduling, provider routing or model orchestration into `kitt-memory`.
 
 The migration direction is therefore one-way: reusable durable knowledge moves toward `kitt-memory`; Agent-specific orchestration stays in `kitt-agent-cli`.
+
+
+## v0.2.0 scope/privacy hardening
+
+Schema v4 adds explicit conversation `scope_key`, point-in-time `as_of` retrieval, atomic sensitivity preservation across independent writers, scope/kind-aware exact deduplication, pre-limit sensitivity filtering and provenance/sensitivity for corrections and concepts. Existing schema v3 databases migrate in place. Legacy conversation rows receive the isolated key `legacy`.

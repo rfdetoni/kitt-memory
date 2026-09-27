@@ -9,3 +9,10 @@ Baseline rules:
 - use least privilege and explicit capability checks;
 - keep secrets out of logs, telemetry and UI events;
 - treat dependency updates as security-sensitive changes and run the full test suite.
+
+
+Memory-specific invariants:
+- conversation-scoped records require an explicit scope key;
+- sensitivity may only become more restrictive during merges/upserts;
+- corrections and concepts retain sensitivity/provenance from their source memories;
+- SQLite uses secure-delete mode and rejects symlink database targets.

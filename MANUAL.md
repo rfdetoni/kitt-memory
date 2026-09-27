@@ -12,14 +12,14 @@ Ele gerencia memórias episódicas, decisões arquiteturais, preferências de us
 ### Componentes:
 - **`kitt-memory-core`**: Definição de domínio, níveis de sensibilidade monotônica (`Public`, `Personal`, `Private`, `Secret`, `Ephemeral`) e normalização.
 - **`kitt-memory-sqlite`**: Driver de alta concorrência SQLite em modo WAL com transações atômicas e permissões de arquivo privadas (`0600` em Unix).
-- **`kitt-memory-migrate`**: Ferramenta CLI para inspecionar, reparar e migrar bases de dados de versões legadas para o **Schema Canônico V3**.
+- **`kitt-memory-migrate`**: Ferramenta CLI para inspecionar, reparar e migrar bases de dados de versões legadas para o **Schema Canônico V4**.
 
 ---
 
 ## 2. Requisitos de Sistema
 
-- **Rust**: 1.85+ (com `cargo`)
-- **SQLite**: 3.35+ (compilado estaticamente ou dinâmico via `libsqlite3`)
+- **Rust**: 1.88+ (com `cargo`)
+- **SQLite**: embutido pelo `rusqlite` (`bundled`); não é necessário instalar `libsqlite3-dev` no build padrão.
 
 ---
 
@@ -28,9 +28,6 @@ Ele gerencia memórias episódicas, decisões arquiteturais, preferências de us
 ### 🐧 A. LINUX (Ubuntu/Debian/Fedora)
 
 ```bash
-# Instalar dependências SQLite (se necessário)
-sudo apt-get install -y sqlite3 libsqlite3-dev
-
 # Compilar workspace completo
 cargo build --release --workspace
 
@@ -73,14 +70,7 @@ O banco de dados SQLite é criado automaticamente no primeiro acesso.
 - **macOS**: `~/Library/Application Support/kitt/memory.db`
 - **Windows**: `%APPDATA%\kitt\memory.db`
 
-### Variáveis de Ambiente:
-```bash
-# Sobrescrever caminho do banco de dados
-export KITT_MEMORY_DB_PATH="/caminho/personalizado/memory.db"
-
-# Habilitar logs detalhados
-export RUST_LOG="kitt_memory=debug"
-```
+O crate não interpreta uma variável própria para caminho do banco nem configura logging global; o componente consumidor define caminho e observabilidade.
 
 ---
 
@@ -114,7 +104,7 @@ cargo run --release --bin kitt-memory-migrate -- \
 
 ## 7. Retrieval híbrido e baseline
 
-O schema v3 mantém o banco local/FTS5 e adiciona validade temporal explícita. Cada memória pode carregar `valid_from` e `valid_until`; recall e baseline filtram registros fora da janela válida antes do ranking. Ao marcar uma memória como `SUPERSEDED` ou `ARCHIVED`, o store fecha a janela temporal aberta sem apagar o registro histórico.
+O schema v4 mantém o banco local/FTS5 e adiciona validade temporal explícita. Cada memória pode carregar `valid_from` e `valid_until`, e consultas podem usar `as_of`; recall e baseline filtram registros fora da janela válida antes do ranking. Ao marcar uma memória como `SUPERSEDED` ou `ARCHIVED`, o store fecha a janela temporal aberta sem apagar o registro histórico.
 
 O recall usa um conjunto de candidatos limitado, combinando sinal lexical, retenção e prioridade. Um chamador pode opcionalmente fornecer um `SemanticReranker`; se esse componente falhar ou não existir, o caminho local continua funcional.
 
@@ -129,3 +119,10 @@ Conteúdo exatamente igual após normalização continua sendo deduplicado autom
 O trait `KnowledgeStore` oferece um ledger de correções com contador de reutilização, conceitos revisáveis com confiança/proveniência e links tipados ponderados. Essas estruturas são neutras ao produto: não conhecem turnos, sessões ou Dreaming do Agent.
 
 `search_concept_neighborhood` parte de conceitos encontrados por FTS e expande relações de forma limitada e cycle-safe (até 4 hops e 100 conceitos). Isso permite recuperação orientada a grafo sem introduzir um banco de grafos residente.
+
+
+## 10. Isolamento, concorrência e privacidade
+
+Memórias `global` são canonicalizadas no escopo global; memórias `workspace` usam o workspace correspondente; memórias `conversation` exigem `scope_key`. Registros de conversa legados migram para a chave isolada `legacy`.
+
+Writes críticos usam transações SQLite `IMMEDIATE`; a sensibilidade monotônica é resolvida atomicamente no SQL. Atualizações de telemetria de acesso não reconstruem o índice FTS. Correções e conceitos persistem sensibilidade e IDs de memórias de origem.

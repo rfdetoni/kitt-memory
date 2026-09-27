@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.0 - 2026-09-26
+
+- Add schema v4 with conversation `scope_key` isolation and point-in-time `as_of` recall.
+- Make monotonic sensitivity and duplicate writes safe across independent SQLite writers.
+- Make exact identity scope/kind-aware, canonicalize global writes and reject persisted enum corruption.
+- Filter privacy before candidate limits, preserve high-salience candidates and keep historical recall side-effect free.
+- Stop FTS write amplification on access telemetry and batch graph-neighborhood traversal.
+- Carry sensitivity/provenance into corrections and concepts and reject malformed JSON/counters.
+- Make migrations transactional with integrity checks and safe legacy conversation migration.
+- Upgrade rusqlite to 0.40.2, set MSRV to Rust 1.88 and extend CI/security coverage.
+
+
 ## 0.1.6 - 2026-09-24
 
 - Add explicit `valid_from` temporal validity to shared memory records and schema v3.
