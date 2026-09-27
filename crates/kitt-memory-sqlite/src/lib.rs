@@ -10,7 +10,7 @@ use rusqlite::{
     types::Type,
 };
 use std::{
-    collections::{BTreeSet, HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet},
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
     sync::Mutex,
@@ -166,7 +166,11 @@ impl SqliteMemoryStore {
             })
             .map_err(storage)?;
 
-        let mut count = 0;
+        let source_check: String = source.query_row("PRAGMA quick_check", [], |row| row.get(0)).map_err(storage)?;
+        if source_check != "ok" {
+            return Err(MemoryError::Corrupt(format!("legacy source quick_check failed: {source_check}")));
+        }
+        let mut imported = Vec::new();
         let mut active_seen: HashMap<(String, String, String, String, String), String> = HashMap::new();
         for row in rows {
             let mut memory = row.map_err(storage)?.canonicalized_for_storage()?;
@@ -175,12 +179,32 @@ impl SqliteMemoryStore {
                 if let Some(keeper) = active_seen.get(&key) {
                     memory.status = MemoryStatus::Superseded;
                     memory.supersedes_id = Some(keeper.clone());
+                    memory.valid_until = close_validity(memory.valid_until, now_epoch());
                 } else {
                     active_seen.insert(key, memory.id.clone());
                 }
             }
-            self.upsert_record(&memory)?;
-            count += 1;
+            imported.push(memory);
+        }
+        let count = imported.len();
+        let mut conn = self.writer_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage)?;
+        for mut memory in imported {
+            if memory.status == MemoryStatus::Active {
+                if let Some(existing_id) = find_identity_id(&tx, &memory)? {
+                    if existing_id != memory.id {
+                        memory.status = MemoryStatus::Superseded;
+                        memory.supersedes_id = Some(existing_id);
+                        memory.valid_until = close_validity(memory.valid_until, now_epoch());
+                    }
+                }
+            }
+            upsert_record_tx(&tx, &memory)?;
+        }
+        tx.commit().map_err(storage)?;
+        let destination_check = self.with_conn(|conn| conn.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0)))?;
+        if destination_check != "ok" {
+            return Err(MemoryError::Corrupt(format!("destination quick_check failed: {destination_check}")));
         }
         Ok(count)
     }
@@ -263,42 +287,29 @@ impl MemoryStore for SqliteMemoryStore {
             return memory.into_record();
         }
         let record = memory.into_record()?;
-        let conn = self.writer_conn()?;
-        let tx = conn.unchecked_transaction().map_err(storage)?;
+        let mut conn = self.writer_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage)?;
 
         let existing_id = tx
             .query_row(
-                "SELECT id FROM memories WHERE namespace=?1 AND workspace_id=?2                  AND content_hash=?3 AND status='ACTIVE' LIMIT 1",
-                params![record.namespace, record.workspace_id, record.content_hash],
+                "SELECT id FROM memories WHERE namespace=?1 AND workspace_id=?2 AND scope=?3 \
+                 AND COALESCE(scope_key,'')=COALESCE(?4,'') AND kind=?5 AND content_hash=?6 \
+                 AND status='ACTIVE' LIMIT 1",
+                params![record.namespace, record.workspace_id, record.scope.as_db(), record.scope_key, record.kind.as_db(), record.content_hash],
                 |row| row.get::<_, String>(0),
             )
             .optional()
             .map_err(storage)?;
 
         if let Some(existing_id) = existing_id {
-            let existing = load_one(&tx, &existing_id)
-                .map_err(storage)?
-                .ok_or_else(|| MemoryError::Storage("duplicate lookup vanished".into()))?;
-            let sensitivity = existing.sensitivity.most_restrictive(record.sensitivity);
-            let pinned = existing.pinned || record.pinned;
-            let importance = existing.importance.max(record.importance);
-            let confidence = existing.confidence.max(record.confidence);
-            let valid_until = merge_valid_until(existing.valid_until, record.valid_until);
-            let updated_at = now_epoch();
-
             tx.execute(
-                "UPDATE memories SET sensitivity=?1,pinned=?2,importance=?3,confidence=?4,                 valid_until=?5,updated_at=?6 WHERE id=?7",
-                params![
-                    sensitivity.as_db(),
-                    pinned as i64,
-                    importance,
-                    confidence,
-                    valid_until,
-                    updated_at,
-                    existing_id
-                ],
-            )
-            .map_err(storage)?;
+                "UPDATE memories SET sensitivity=CASE WHEN \
+                 (CASE sensitivity WHEN 'public' THEN 0 WHEN 'personal' THEN 1 WHEN 'private' THEN 2 WHEN 'secret' THEN 3 ELSE 4 END)>= \
+                 (CASE ?1 WHEN 'public' THEN 0 WHEN 'personal' THEN 1 WHEN 'private' THEN 2 WHEN 'secret' THEN 3 ELSE 4 END) \
+                 THEN sensitivity ELSE ?1 END,pinned=MAX(pinned,?2),importance=MAX(importance,?3),confidence=MAX(confidence,?4), \
+                 valid_until=CASE WHEN valid_until IS NULL OR ?5 IS NULL THEN NULL ELSE MAX(valid_until,?5) END,updated_at=?6 WHERE id=?7",
+                params![record.sensitivity.as_db(), record.pinned as i64, record.importance, record.confidence, record.valid_until, now_epoch(), existing_id],
+            ).map_err(storage)?;
             tx.commit().map_err(storage)?;
 
             return self
@@ -312,38 +323,18 @@ impl MemoryStore for SqliteMemoryStore {
     }
 
     fn upsert_record(&self, memory: &MemoryRecord) -> Result<()> {
-        let conn = self.writer_conn()?;
-        let mut merged = memory.clone();
-        if let Some(existing) = load_one(&conn, &memory.id).map_err(storage)? {
-            merged.sensitivity = existing.sensitivity.most_restrictive(memory.sensitivity);
+        let memory = memory.canonicalized_for_storage()?;
+        let mut conn = self.writer_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage)?;
+        if memory.status == MemoryStatus::Active {
+            if let Some(existing_id) = find_identity_id(&tx, &memory)? {
+                if existing_id != memory.id {
+                    return Err(MemoryError::Invalid(format!("active memory identity conflicts with {existing_id}")));
+                }
+            }
         }
-        conn.execute(
-            "INSERT INTO memories(id,namespace,workspace_id,kind,content,normalized_content,status,             sensitivity,scope,importance,confidence,created_at,updated_at,last_accessed_at,             access_count,valid_from,valid_until,supersedes_id,content_hash,pinned,metadata_json)              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)              ON CONFLICT(id) DO UPDATE SET              namespace=excluded.namespace,workspace_id=excluded.workspace_id,kind=excluded.kind,             content=excluded.content,normalized_content=excluded.normalized_content,             status=excluded.status,sensitivity=excluded.sensitivity,scope=excluded.scope,             importance=excluded.importance,confidence=excluded.confidence,             updated_at=excluded.updated_at,last_accessed_at=excluded.last_accessed_at,             access_count=excluded.access_count,valid_from=excluded.valid_from,valid_until=excluded.valid_until,             supersedes_id=excluded.supersedes_id,content_hash=excluded.content_hash,             pinned=excluded.pinned,metadata_json=excluded.metadata_json",
-            params![
-                merged.id,
-                merged.namespace,
-                merged.workspace_id,
-                merged.kind.as_db(),
-                merged.content,
-                merged.normalized_content,
-                merged.status.as_db(),
-                merged.sensitivity.as_db(),
-                merged.scope.as_db(),
-                merged.importance,
-                merged.confidence,
-                merged.created_at,
-                merged.updated_at,
-                merged.last_accessed_at,
-                merged.access_count as i64,
-                merged.valid_from,
-                merged.valid_until,
-                merged.supersedes_id,
-                merged.content_hash,
-                merged.pinned as i64,
-                merged.metadata_json
-            ],
-        )
-        .map_err(storage)?;
+        upsert_record_tx(&tx, &memory)?;
+        tx.commit().map_err(storage)?;
         Ok(())
     }
 
@@ -360,13 +351,16 @@ impl MemoryStore for SqliteMemoryStore {
     }
 
     fn baseline(&self, query: &BaselineQuery) -> Result<MemoryBaseline> {
-        let now = now_epoch();
+        let at = query.as_of.unwrap_or_else(now_epoch);
+        let scope_key = query.scope_key.as_deref().unwrap_or("");
         let records = self.with_conn(|conn| {
-            let sql = format!(
-                "SELECT {MEMORY_COLUMNS} FROM memories m                  WHERE m.namespace=?1 AND (m.workspace_id=?2 OR m.scope='global')                    AND m.status='ACTIVE' AND (m.valid_from IS NULL OR m.valid_from<=?3) AND (m.valid_until IS NULL OR m.valid_until>?3)                  ORDER BY m.pinned DESC,m.importance DESC,m.updated_at DESC LIMIT 512"
-            );
+            let sql = format!("SELECT {MEMORY_COLUMNS} FROM memories m WHERE m.namespace=?1 \
+                AND (m.scope='global' OR (m.workspace_id=?2 AND m.scope='workspace') OR (m.workspace_id=?2 AND m.scope='conversation' AND m.scope_key=?3)) \
+                AND m.status='ACTIVE' AND (m.valid_from IS NULL OR m.valid_from<=?4) AND (m.valid_until IS NULL OR m.valid_until>?4) \
+                AND m.sensitivity<>'ephemeral' AND (m.sensitivity<>'private' OR ?5=1) AND (m.sensitivity<>'secret' OR ?6=1) \
+                ORDER BY m.pinned DESC,m.importance DESC,m.updated_at DESC LIMIT 512");
             let mut stmt = conn.prepare(&sql)?;
-            stmt.query_map(params![query.namespace, query.workspace_id, now], map_memory_row)?
+            stmt.query_map(params![query.namespace, query.workspace_id, scope_key, at, query.allow_private as i64, query.allow_secret as i64], map_memory_row)?
                 .collect::<std::result::Result<Vec<_>, _>>()
         })?;
         Ok(build_memory_baseline(records, query))
@@ -381,12 +375,14 @@ impl MemoryStore for SqliteMemoryStore {
         let recall = RecallQuery {
             namespace: memory.namespace.clone(),
             workspace_id: memory.workspace_id.clone(),
-            scope_key: None,
+            scope_key: memory.scope_key.clone(),
             text: memory.content.clone(),
-            limit: limit.clamp(1, 32),
+            limit: limit.min(32),
+            as_of: None,
             allow_private: true,
             allow_secret: true,
         };
+        if recall.limit == 0 { return Ok(Vec::new()); }
         let cap = (recall.limit * 8).clamp(32, 128);
         let candidates = self.load_recall_candidates(&recall, cap)?;
         let records = candidates
@@ -445,12 +441,12 @@ impl MemoryStore for SqliteMemoryStore {
         let closes_validity = matches!(&status, MemoryStatus::Superseded | MemoryStatus::Archived);
         let changed = if closes_validity {
             conn.execute(
-                "UPDATE memories SET status=?1,supersedes_id=?2,updated_at=?3,                 valid_until=COALESCE(valid_until,?3) WHERE id=?4",
+                "UPDATE memories SET status=?1,supersedes_id=?2,updated_at=?3,valid_until=CASE WHEN valid_until IS NULL OR valid_until>?3 THEN ?3 ELSE valid_until END WHERE id=?4",
                 params![status.as_db(), supersedes_id, now, id],
             )
         } else {
             conn.execute(
-                "UPDATE memories SET status=?1,supersedes_id=?2,updated_at=?3 WHERE id=?4",
+                "UPDATE memories SET status=?1,supersedes_id=?2,updated_at=?3 WHERE id=?4 AND status='ACTIVE'",
                 params![status.as_db(), supersedes_id, now, id],
             )
         }
@@ -470,35 +466,34 @@ impl MemoryStore for SqliteMemoryStore {
     fn consolidate_exact_duplicates(&self, namespace: &str, workspace_id: &str) -> Result<usize> {
         let rows = self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT content_hash,id FROM memories                  WHERE namespace=?1 AND workspace_id=?2 AND status='ACTIVE'                  ORDER BY pinned DESC,importance DESC,updated_at DESC",
+                "SELECT scope,COALESCE(scope_key,''),kind,content_hash,id FROM memories WHERE namespace=?1 AND workspace_id=?2 AND status='ACTIVE' ORDER BY pinned DESC,importance DESC,updated_at DESC",
             )?;
-            stmt.query_map(params![namespace, workspace_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
+            stmt.query_map(params![namespace, workspace_id], |row| Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?,row.get::<_, String>(2)?,row.get::<_, String>(3)?,row.get::<_, String>(4)?)))?
             .collect::<std::result::Result<Vec<_>, _>>()
         })?;
 
-        let mut keeper: HashMap<String, String> = HashMap::new();
+        let mut keeper: HashMap<(String,String,String,String), String> = HashMap::new();
         let mut superseded = Vec::new();
-        for (hash, id) in rows {
-            if let Some(keep) = keeper.get(&hash) {
+        for (scope, scope_key, kind, hash, id) in rows {
+            let key=(scope,scope_key,kind,hash);
+            if let Some(keep) = keeper.get(&key) {
                 superseded.push((id, keep.clone()));
             } else {
-                keeper.insert(hash, id);
+                keeper.insert(key, id);
             }
         }
         if superseded.is_empty() {
             return Ok(0);
         }
 
-        let conn = self.writer_conn()?;
-        let tx = conn.unchecked_transaction().map_err(storage)?;
+        let mut conn = self.writer_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage)?;
         let updated_at = now_epoch();
         let mut changed = 0;
         for (id, keep) in &superseded {
             changed += tx
                 .execute(
-                    "UPDATE memories SET status='SUPERSEDED',supersedes_id=?1,updated_at=?2,                     valid_until=COALESCE(valid_until,?2) WHERE id=?3 AND status='ACTIVE'",
+                    "UPDATE memories SET status='SUPERSEDED',supersedes_id=?1,updated_at=?2,valid_until=CASE WHEN valid_until IS NULL OR valid_until>?2 THEN ?2 ELSE valid_until END WHERE id=?3 AND status='ACTIVE'",
                     params![keep, updated_at, id],
                 )
                 .map_err(storage)?;
@@ -513,7 +508,7 @@ impl KnowledgeStore for SqliteMemoryStore {
         let record = correction.into_record()?;
         let conn = self.writer_conn()?;
         conn.execute(
-            "INSERT INTO corrections(id,namespace,workspace_id,context,predicted,corrected,reason,             source,applied_count,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            "INSERT INTO corrections(id,namespace,workspace_id,context,predicted,corrected,reason,source,sensitivity,source_memory_ids_json,applied_count,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
             params![
                 record.id,
                 record.namespace,
@@ -523,6 +518,8 @@ impl KnowledgeStore for SqliteMemoryStore {
                 record.corrected,
                 record.reason,
                 record.source,
+                record.sensitivity.as_db(),
+                serde_json::to_string(&record.source_memory_ids).map_err(json_storage)?,
                 record.applied_count as i64,
                 record.created_at,
                 record.updated_at
@@ -539,14 +536,15 @@ impl KnowledgeStore for SqliteMemoryStore {
         query: &str,
         limit: usize,
     ) -> Result<Vec<CorrectionRecord>> {
-        let limit = limit.clamp(1, 50);
+        if limit == 0 { return Ok(Vec::new()); }
+        let limit = limit.min(50);
         let fts = fts_query(query);
         let mut rows = if fts.is_empty() {
             Vec::new()
         } else {
             self.with_conn(|conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT c.id,c.namespace,c.workspace_id,c.context,c.predicted,c.corrected,                     c.reason,c.source,c.applied_count,c.created_at,c.updated_at                      FROM corrections_fts JOIN corrections c ON c.rowid=corrections_fts.rowid                      WHERE corrections_fts MATCH ?1 AND c.namespace=?2 AND c.workspace_id=?3                      ORDER BY bm25(corrections_fts) ASC,c.applied_count DESC LIMIT ?4",
+                    "SELECT c.id,c.namespace,c.workspace_id,c.context,c.predicted,c.corrected,c.reason,c.source,c.sensitivity,c.source_memory_ids_json,c.applied_count,c.created_at,c.updated_at FROM corrections_fts JOIN corrections c ON c.rowid=corrections_fts.rowid                      WHERE corrections_fts MATCH ?1 AND c.namespace=?2 AND c.workspace_id=?3                      ORDER BY bm25(corrections_fts) ASC,c.applied_count DESC LIMIT ?4",
                 )?;
                 stmt.query_map(params![fts, namespace, workspace_id, limit as i64], map_correction)?
                     .collect::<std::result::Result<Vec<_>, _>>()
@@ -555,7 +553,7 @@ impl KnowledgeStore for SqliteMemoryStore {
         if rows.is_empty() {
             rows = self.with_conn(|conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT id,namespace,workspace_id,context,predicted,corrected,reason,source,                     applied_count,created_at,updated_at FROM corrections                      WHERE namespace=?1 AND workspace_id=?2                      ORDER BY applied_count DESC,updated_at DESC LIMIT ?3",
+                    "SELECT id,namespace,workspace_id,context,predicted,corrected,reason,source,sensitivity,source_memory_ids_json,applied_count,created_at,updated_at FROM corrections                      WHERE namespace=?1 AND workspace_id=?2                      ORDER BY applied_count DESC,updated_at DESC LIMIT ?3",
                 )?;
                 stmt.query_map(params![namespace, workspace_id, limit as i64], map_correction)?
                     .collect::<std::result::Result<Vec<_>, _>>()
@@ -577,12 +575,12 @@ impl KnowledgeStore for SqliteMemoryStore {
 
     fn upsert_concept(&self, concept: NewConcept) -> Result<StoredConcept> {
         let incoming = concept.into_record()?;
-        let conn = self.writer_conn()?;
-        let tx = conn.unchecked_transaction().map_err(storage)?;
+        let mut conn = self.writer_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage)?;
 
         let existing = tx
             .query_row(
-                "SELECT id,namespace,workspace_id,name,definition,confidence,revision,                 labels_json,source_memory_ids_json,created_at,updated_at                  FROM concepts WHERE namespace=?1 AND workspace_id=?2 AND name=?3",
+                "SELECT id,namespace,workspace_id,name,definition,confidence,sensitivity,revision,labels_json,source_memory_ids_json,created_at,updated_at FROM concepts WHERE namespace=?1 AND workspace_id=?2 AND name=?3",
                 params![incoming.namespace, incoming.workspace_id, incoming.name],
                 map_concept,
             )
@@ -592,16 +590,18 @@ impl KnowledgeStore for SqliteMemoryStore {
         let stored = if let Some(mut existing) = existing {
             existing.definition = incoming.definition;
             existing.confidence = existing.confidence.max(incoming.confidence);
+            existing.sensitivity = existing.sensitivity.most_restrictive(incoming.sensitivity);
             existing.revision = existing.revision.saturating_add(1);
             existing.labels = merged_strings(existing.labels, incoming.labels);
             existing.source_memory_ids =
                 merged_strings(existing.source_memory_ids, incoming.source_memory_ids);
             existing.updated_at = now_epoch();
             tx.execute(
-                "UPDATE concepts SET definition=?1,confidence=?2,revision=?3,labels_json=?4,                 source_memory_ids_json=?5,updated_at=?6 WHERE id=?7",
+                "UPDATE concepts SET definition=?1,confidence=?2,sensitivity=?3,revision=?4,labels_json=?5,source_memory_ids_json=?6,updated_at=?7 WHERE id=?8",
                 params![
                     existing.definition,
                     existing.confidence,
+                    existing.sensitivity.as_db(),
                     existing.revision as i64,
                     serde_json::to_string(&existing.labels).map_err(json_storage)?,
                     serde_json::to_string(&existing.source_memory_ids).map_err(json_storage)?,
@@ -613,7 +613,7 @@ impl KnowledgeStore for SqliteMemoryStore {
             existing
         } else {
             tx.execute(
-                "INSERT INTO concepts(id,namespace,workspace_id,name,definition,confidence,revision,                 labels_json,source_memory_ids_json,created_at,updated_at)                  VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                "INSERT INTO concepts(id,namespace,workspace_id,name,definition,confidence,sensitivity,revision,labels_json,source_memory_ids_json,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
                 params![
                     incoming.id,
                     incoming.namespace,
@@ -621,6 +621,7 @@ impl KnowledgeStore for SqliteMemoryStore {
                     incoming.name,
                     incoming.definition,
                     incoming.confidence,
+                    incoming.sensitivity.as_db(),
                     incoming.revision as i64,
                     serde_json::to_string(&incoming.labels).map_err(json_storage)?,
                     serde_json::to_string(&incoming.source_memory_ids).map_err(json_storage)?,
@@ -643,14 +644,15 @@ impl KnowledgeStore for SqliteMemoryStore {
         query: &str,
         limit: usize,
     ) -> Result<Vec<StoredConcept>> {
-        let limit = limit.clamp(1, 50);
+        if limit == 0 { return Ok(Vec::new()); }
+        let limit = limit.min(50);
         let fts = fts_query(query);
         let mut rows = if fts.is_empty() {
             Vec::new()
         } else {
             self.with_conn(|conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT c.id,c.namespace,c.workspace_id,c.name,c.definition,c.confidence,                     c.revision,c.labels_json,c.source_memory_ids_json,c.created_at,c.updated_at                      FROM concepts_fts JOIN concepts c ON c.rowid=concepts_fts.rowid                      WHERE concepts_fts MATCH ?1 AND c.namespace=?2 AND c.workspace_id=?3                      ORDER BY bm25(concepts_fts) ASC,c.confidence DESC LIMIT ?4",
+                    "SELECT c.id,c.namespace,c.workspace_id,c.name,c.definition,c.confidence,c.sensitivity,c.revision,c.labels_json,c.source_memory_ids_json,c.created_at,c.updated_at FROM concepts_fts JOIN concepts c ON c.rowid=concepts_fts.rowid                      WHERE concepts_fts MATCH ?1 AND c.namespace=?2 AND c.workspace_id=?3                      ORDER BY bm25(concepts_fts) ASC,c.confidence DESC LIMIT ?4",
                 )?;
                 stmt.query_map(params![fts, namespace, workspace_id, limit as i64], map_concept)?
                     .collect::<std::result::Result<Vec<_>, _>>()
@@ -659,7 +661,7 @@ impl KnowledgeStore for SqliteMemoryStore {
         if rows.is_empty() {
             rows = self.with_conn(|conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT id,namespace,workspace_id,name,definition,confidence,revision,                     labels_json,source_memory_ids_json,created_at,updated_at FROM concepts                      WHERE namespace=?1 AND workspace_id=?2                      ORDER BY confidence DESC,updated_at DESC LIMIT ?3",
+                    "SELECT id,namespace,workspace_id,name,definition,confidence,sensitivity,revision,labels_json,source_memory_ids_json,created_at,updated_at FROM concepts                      WHERE namespace=?1 AND workspace_id=?2                      ORDER BY confidence DESC,updated_at DESC LIMIT ?3",
                 )?;
                 stmt.query_map(params![namespace, workspace_id, limit as i64], map_concept)?
                     .collect::<std::result::Result<Vec<_>, _>>()
@@ -703,47 +705,12 @@ impl KnowledgeStore for SqliteMemoryStore {
             ));
         }
 
-        let existing_id = conn
-            .query_row(
-                "SELECT id FROM concept_links WHERE namespace=?1 AND workspace_id=?2                  AND source_id=?3 AND target_id=?4 AND relation=?5",
-                params![
-                    namespace,
-                    workspace_id,
-                    source_id,
-                    target_id,
-                    relation.as_db()
-                ],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(storage)?;
-
-        let id = existing_id.unwrap_or_else(|| format!("edge_{}", uuid::Uuid::new_v4().simple()));
-        conn.execute(
-            "INSERT INTO concept_links(id,namespace,workspace_id,source_id,target_id,relation,weight,created_at)              VALUES(?1,?2,?3,?4,?5,?6,?7,?8)              ON CONFLICT(namespace,workspace_id,source_id,target_id,relation)              DO UPDATE SET weight=excluded.weight",
-            params![
-                id,
-                namespace,
-                workspace_id,
-                source_id,
-                target_id,
-                relation.as_db(),
-                weight,
-                now
-            ],
-        )
-        .map_err(storage)?;
-
-        Ok(KnowledgeEdge {
-            id,
-            namespace: namespace.into(),
-            workspace_id: workspace_id.into(),
-            source_id: source_id.into(),
-            target_id: target_id.into(),
-            relation,
-            weight,
-            created_at: now,
-        })
+        let (id, created_at, stored_weight) = conn.query_row(
+            "INSERT INTO concept_links(id,namespace,workspace_id,source_id,target_id,relation,weight,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(namespace,workspace_id,source_id,target_id,relation) DO UPDATE SET weight=excluded.weight RETURNING id,created_at,weight",
+            params![format!("edge_{}", uuid::Uuid::new_v4().simple()),namespace,workspace_id,source_id,target_id,relation.as_db(),weight,now],
+            |row| Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?,row.get::<_,f64>(2)? as f32)),
+        ).map_err(storage)?;
+        Ok(KnowledgeEdge { id, namespace: namespace.into(), workspace_id: workspace_id.into(), source_id: source_id.into(), target_id: target_id.into(), relation, weight: stored_weight, created_at })
     }
 
     fn links_for_concept(
@@ -765,7 +732,7 @@ impl KnowledgeStore for SqliteMemoryStore {
                         workspace_id: row.get(2)?,
                         source_id: row.get(3)?,
                         target_id: row.get(4)?,
-                        relation: KnowledgeRelation::from_db(&row.get::<_, String>(5)?),
+                        relation: parse_relation_at(row.get::<_,String>(5)?,5)?,
                         weight: row.get::<_, f64>(6)? as f32,
                         created_at: row.get(7)?,
                     })
@@ -774,65 +741,33 @@ impl KnowledgeStore for SqliteMemoryStore {
             .collect::<std::result::Result<Vec<_>, _>>()
         })
     }
-    fn expand_concepts(
-        &self,
-        namespace: &str,
-        workspace_id: &str,
-        seed_ids: &[String],
-        max_hops: usize,
-        limit: usize,
-    ) -> Result<Vec<StoredConcept>> {
-        let max_hops = max_hops.min(4);
-        let limit = limit.clamp(1, 100);
-        let mut queue = VecDeque::new();
-        for seed in seed_ids.iter().take(16) {
-            if !seed.trim().is_empty() {
-                queue.push_back((seed.clone(), 0usize));
-            }
-        }
-
-        let mut visited = HashSet::new();
-        let mut concepts = Vec::new();
-        while let Some((concept_id, depth)) = queue.pop_front() {
-            if concepts.len() >= limit || !visited.insert(concept_id.clone()) {
-                continue;
-            }
-            let concept = self.with_conn(|conn| {
-                conn.query_row(
-                    "SELECT id,namespace,workspace_id,name,definition,confidence,revision,                     labels_json,source_memory_ids_json,created_at,updated_at FROM concepts                      WHERE namespace=?1 AND workspace_id=?2 AND id=?3",
-                    params![namespace, workspace_id, concept_id],
-                    map_concept,
-                )
-                .optional()
-            })?;
-            let Some(concept) = concept else {
-                continue;
-            };
-            concepts.push(concept);
-            if depth >= max_hops {
-                continue;
-            }
-            for edge in self.links_for_concept(namespace, workspace_id, &concept_id)? {
-                let neighbor = if edge.source_id == concept_id {
-                    edge.target_id
-                } else {
-                    edge.source_id
-                };
-                if !visited.contains(&neighbor) {
-                    queue.push_back((neighbor, depth + 1));
-                }
-            }
+    fn expand_concepts(&self,namespace:&str,workspace_id:&str,seed_ids:&[String],max_hops:usize,limit:usize)->Result<Vec<StoredConcept>>{
+        if limit==0||seed_ids.is_empty(){return Ok(Vec::new());}
+        let max_hops=max_hops.min(4); let limit=limit.min(100); let conn=self.conn()?;
+        let mut frontier=seed_ids.iter().filter(|id|!id.trim().is_empty()).take(16).cloned().collect::<Vec<_>>();
+        let mut visited=HashSet::new(); let mut concepts=Vec::new();
+        for _ in 0..=max_hops {
+            frontier.retain(|id|visited.insert(id.clone()));
+            if frontier.is_empty()||concepts.len()>=limit{break;}
+            let ph=(0..frontier.len()).map(|i|format!("?{}",i+3)).collect::<Vec<_>>().join(",");
+            let mut values=vec![rusqlite::types::Value::from(namespace.to_string()),rusqlite::types::Value::from(workspace_id.to_string())];
+            values.extend(frontier.iter().cloned().map(rusqlite::types::Value::from));
+            let sql=format!("SELECT id,namespace,workspace_id,name,definition,confidence,sensitivity,revision,labels_json,source_memory_ids_json,created_at,updated_at FROM concepts WHERE namespace=?1 AND workspace_id=?2 AND id IN ({ph})");
+            let mut stmt=conn.prepare(&sql).map_err(storage)?;
+            let loaded=stmt.query_map(rusqlite::params_from_iter(values.iter()),map_concept).map_err(storage)?.collect::<std::result::Result<Vec<_>,_>>().map_err(storage)?;
+            let mut by_id=loaded.into_iter().map(|c|(c.id.clone(),c)).collect::<HashMap<_,_>>();
+            for id in &frontier {if let Some(c)=by_id.remove(id){concepts.push(c);if concepts.len()>=limit{break;}}}
+            if concepts.len()>=limit{break;}
+            let mut ev=vec![rusqlite::types::Value::from(namespace.to_string()),rusqlite::types::Value::from(workspace_id.to_string())];
+            ev.extend(frontier.iter().cloned().map(rusqlite::types::Value::from));
+            let esql=format!("SELECT source_id,target_id FROM concept_links WHERE namespace=?1 AND workspace_id=?2 AND (source_id IN ({ph}) OR target_id IN ({ph}))");
+            let mut estmt=conn.prepare(&esql).map_err(storage)?;
+            let edges=estmt.query_map(rusqlite::params_from_iter(ev.iter()),|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).map_err(storage)?.collect::<std::result::Result<Vec<_>,_>>().map_err(storage)?;
+            let current=frontier.iter().cloned().collect::<HashSet<_>>(); let mut next=BTreeSet::new();
+            for(source,target)in edges{if current.contains(&source)&&!visited.contains(&target){next.insert(target);}if current.contains(&target)&&!visited.contains(&source){next.insert(source);}}
+            frontier=next.into_iter().collect();
         }
         Ok(concepts)
-    }
-}
-
-fn sensitivity_allowed(sensitivity: Sensitivity, query: &RecallQuery) -> bool {
-    match sensitivity {
-        Sensitivity::Secret => query.allow_secret,
-        Sensitivity::Private => query.allow_private,
-        Sensitivity::Ephemeral => false,
-        _ => true,
     }
 }
 
@@ -858,11 +793,14 @@ fn merged_strings(left: Vec<String>, right: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-fn merge_valid_until(existing: Option<i64>, incoming: Option<i64>) -> Option<i64> {
-    match (existing, incoming) {
-        (None, _) | (_, None) => None,
-        (Some(left), Some(right)) => Some(left.max(right)),
-    }
+fn close_validity(existing:Option<i64>,at:i64)->Option<i64>{Some(existing.map_or(at,|until|until.min(at)))}
+fn identity_key(memory:&MemoryRecord)->(String,String,String,String,String){(memory.workspace_id.clone(),memory.scope.as_db().to_string(),memory.scope_key.clone().unwrap_or_default(),memory.kind.as_db().to_string(),memory.content_hash.clone())}
+fn find_identity_id(conn:&Connection,memory:&MemoryRecord)->Result<Option<String>>{
+    conn.query_row("SELECT id FROM memories WHERE namespace=?1 AND workspace_id=?2 AND scope=?3 AND COALESCE(scope_key,'')=COALESCE(?4,'') AND kind=?5 AND content_hash=?6 AND status='ACTIVE' LIMIT 1",params![memory.namespace,memory.workspace_id,memory.scope.as_db(),memory.scope_key,memory.kind.as_db(),memory.content_hash],|row|row.get(0)).optional().map_err(storage)
+}
+fn upsert_record_tx(conn:&Connection,memory:&MemoryRecord)->Result<()>{
+    conn.execute("INSERT INTO memories(id,namespace,workspace_id,kind,content,normalized_content,status,sensitivity,scope,scope_key,importance,confidence,created_at,updated_at,last_accessed_at,access_count,valid_from,valid_until,supersedes_id,content_hash,pinned,metadata_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22) ON CONFLICT(id) DO UPDATE SET namespace=excluded.namespace,workspace_id=excluded.workspace_id,kind=excluded.kind,content=excluded.content,normalized_content=excluded.normalized_content,status=excluded.status,sensitivity=CASE WHEN (CASE memories.sensitivity WHEN 'public' THEN 0 WHEN 'personal' THEN 1 WHEN 'private' THEN 2 WHEN 'secret' THEN 3 ELSE 4 END)>=(CASE excluded.sensitivity WHEN 'public' THEN 0 WHEN 'personal' THEN 1 WHEN 'private' THEN 2 WHEN 'secret' THEN 3 ELSE 4 END) THEN memories.sensitivity ELSE excluded.sensitivity END,scope=excluded.scope,scope_key=excluded.scope_key,importance=excluded.importance,confidence=excluded.confidence,updated_at=excluded.updated_at,last_accessed_at=excluded.last_accessed_at,access_count=excluded.access_count,valid_from=excluded.valid_from,valid_until=excluded.valid_until,supersedes_id=excluded.supersedes_id,content_hash=excluded.content_hash,pinned=excluded.pinned,metadata_json=excluded.metadata_json",params![memory.id,memory.namespace,memory.workspace_id,memory.kind.as_db(),memory.content,memory.normalized_content,memory.status.as_db(),memory.sensitivity.as_db(),memory.scope.as_db(),memory.scope_key,memory.importance,memory.confidence,memory.created_at,memory.updated_at,memory.last_accessed_at,memory.access_count as i64,memory.valid_from,memory.valid_until,memory.supersedes_id,memory.content_hash,memory.pinned as i64,memory.metadata_json]).map_err(storage)?;
+    Ok(())
 }
 
 fn insert_record(
@@ -870,7 +808,7 @@ fn insert_record(
     memory: &MemoryRecord,
 ) -> std::result::Result<usize, rusqlite::Error> {
     conn.execute(
-        "INSERT INTO memories(id,namespace,workspace_id,kind,content,normalized_content,status,         sensitivity,scope,importance,confidence,created_at,updated_at,last_accessed_at,access_count,         valid_from,valid_until,supersedes_id,content_hash,pinned,metadata_json)          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
+        "INSERT INTO memories(id,namespace,workspace_id,kind,content,normalized_content,status,sensitivity,scope,scope_key,importance,confidence,created_at,updated_at,last_accessed_at,access_count,valid_from,valid_until,supersedes_id,content_hash,pinned,metadata_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
         params![
             memory.id,
             memory.namespace,
@@ -881,6 +819,7 @@ fn insert_record(
             memory.status.as_db(),
             memory.sensitivity.as_db(),
             memory.scope.as_db(),
+            memory.scope_key,
             memory.importance,
             memory.confidence,
             memory.created_at,
@@ -897,31 +836,16 @@ fn insert_record(
     )
 }
 
-fn map_memory_row(row: &rusqlite::Row<'_>) -> std::result::Result<MemoryRecord, rusqlite::Error> {
-    Ok(MemoryRecord {
-        id: row.get(0)?,
-        namespace: row.get(1)?,
-        workspace_id: row.get(2)?,
-        kind: MemoryKind::from_db(&row.get::<_, String>(3)?),
-        content: row.get(4)?,
-        normalized_content: row.get(5)?,
-        status: MemoryStatus::from_db(&row.get::<_, String>(6)?),
-        sensitivity: Sensitivity::from_db(&row.get::<_, String>(7)?),
-        scope: MemoryScope::from_db(&row.get::<_, String>(8)?),
-        importance: row.get::<_, f64>(9)? as f32,
-        confidence: row.get::<_, f64>(10)? as f32,
-        created_at: row.get(11)?,
-        updated_at: row.get(12)?,
-        last_accessed_at: row.get(13)?,
-        access_count: row.get::<_, i64>(14)? as u64,
-        valid_from: row.get(15)?,
-        valid_until: row.get(16)?,
-        supersedes_id: row.get(17)?,
-        content_hash: row.get(18)?,
-        pinned: row.get::<_, i64>(19)? != 0,
-        metadata_json: row.get(20)?,
-    })
+fn map_memory_row(row:&rusqlite::Row<'_>)->std::result::Result<MemoryRecord,rusqlite::Error>{
+ let count=row.get::<_,i64>(15)?; if count<0{return Err(data_error(15,MemoryError::Corrupt("negative access_count".into())));}
+ Ok(MemoryRecord{id:row.get(0)?,namespace:row.get(1)?,workspace_id:row.get(2)?,kind:parse_kind_at(row.get::<_,String>(3)?,3)?,content:row.get(4)?,normalized_content:row.get(5)?,status:parse_status_at(row.get::<_,String>(6)?,6)?,sensitivity:parse_sensitivity_at(row.get::<_,String>(7)?,7)?,scope:parse_scope_at(row.get::<_,String>(8)?,8)?,scope_key:row.get(9)?,importance:row.get::<_,f64>(10)? as f32,confidence:row.get::<_,f64>(11)? as f32,created_at:row.get(12)?,updated_at:row.get(13)?,last_accessed_at:row.get(14)?,access_count:count as u64,valid_from:row.get(16)?,valid_until:row.get(17)?,supersedes_id:row.get(18)?,content_hash:row.get(19)?,pinned:row.get::<_,i64>(20)?!=0,metadata_json:row.get(21)?})
 }
+fn data_error(i:usize,e:MemoryError)->rusqlite::Error{rusqlite::Error::FromSqlConversionFailure(i,Type::Text,Box::new(e))}
+fn parse_kind_at(v:String,i:usize)->std::result::Result<MemoryKind,rusqlite::Error>{MemoryKind::from_db(&v).map_err(|e|data_error(i,e))}
+fn parse_status_at(v:String,i:usize)->std::result::Result<MemoryStatus,rusqlite::Error>{MemoryStatus::from_db(&v).map_err(|e|data_error(i,e))}
+fn parse_sensitivity_at(v:String,i:usize)->std::result::Result<Sensitivity,rusqlite::Error>{Sensitivity::from_db(&v).map_err(|e|data_error(i,e))}
+fn parse_scope_at(v:String,i:usize)->std::result::Result<MemoryScope,rusqlite::Error>{MemoryScope::from_db(&v).map_err(|e|data_error(i,e))}
+fn parse_relation_at(v:String,i:usize)->std::result::Result<KnowledgeRelation,rusqlite::Error>{KnowledgeRelation::from_db(&v).map_err(|e|data_error(i,e))}
 
 fn load_one(
     conn: &Connection,
@@ -931,190 +855,54 @@ fn load_one(
     conn.query_row(&sql, [id], map_memory_row).optional()
 }
 
-fn map_correction(
-    row: &rusqlite::Row<'_>,
-) -> std::result::Result<CorrectionRecord, rusqlite::Error> {
-    Ok(CorrectionRecord {
-        id: row.get(0)?,
-        namespace: row.get(1)?,
-        workspace_id: row.get(2)?,
-        context: row.get(3)?,
-        predicted: row.get(4)?,
-        corrected: row.get(5)?,
-        reason: row.get(6)?,
-        source: row.get(7)?,
-        applied_count: row.get::<_, i64>(8)? as u64,
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
-    })
+fn map_correction(row:&rusqlite::Row<'_>)->std::result::Result<CorrectionRecord,rusqlite::Error>{
+ let src:String=row.get(9)?;let count=row.get::<_,i64>(10)?;if count<0{return Err(data_error(10,MemoryError::Corrupt("negative correction applied_count".into())));}
+ Ok(CorrectionRecord{id:row.get(0)?,namespace:row.get(1)?,workspace_id:row.get(2)?,context:row.get(3)?,predicted:row.get(4)?,corrected:row.get(5)?,reason:row.get(6)?,source:row.get(7)?,sensitivity:parse_sensitivity_at(row.get::<_,String>(8)?,8)?,source_memory_ids:serde_json::from_str(&src).map_err(|e|data_error(9,MemoryError::Corrupt(e.to_string())))?,applied_count:count as u64,created_at:row.get(11)?,updated_at:row.get(12)?})
 }
 
-fn map_concept(row: &rusqlite::Row<'_>) -> std::result::Result<StoredConcept, rusqlite::Error> {
-    let labels_json: String = row.get(7)?;
-    let source_json: String = row.get(8)?;
-    Ok(StoredConcept {
-        id: row.get(0)?,
-        namespace: row.get(1)?,
-        workspace_id: row.get(2)?,
-        name: row.get(3)?,
-        definition: row.get(4)?,
-        confidence: row.get::<_, f64>(5)? as f32,
-        revision: row.get::<_, i64>(6)? as u64,
-        labels: serde_json::from_str(&labels_json).unwrap_or_default(),
-        source_memory_ids: serde_json::from_str(&source_json).unwrap_or_default(),
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
-    })
+fn map_concept(row:&rusqlite::Row<'_>)->std::result::Result<StoredConcept,rusqlite::Error>{
+ let labels:String=row.get(8)?;let sources:String=row.get(9)?;let revision=row.get::<_,i64>(7)?;if revision<0{return Err(data_error(7,MemoryError::Corrupt("negative concept revision".into())));}
+ Ok(StoredConcept{id:row.get(0)?,namespace:row.get(1)?,workspace_id:row.get(2)?,name:row.get(3)?,definition:row.get(4)?,confidence:row.get::<_,f64>(5)? as f32,sensitivity:parse_sensitivity_at(row.get::<_,String>(6)?,6)?,revision:revision as u64,labels:serde_json::from_str(&labels).map_err(|e|data_error(8,MemoryError::Corrupt(e.to_string())))?,source_memory_ids:serde_json::from_str(&sources).map_err(|e|data_error(9,MemoryError::Corrupt(e.to_string())))?,created_at:row.get(10)?,updated_at:row.get(11)?})
 }
 
-fn migrate(conn: &Connection) -> std::result::Result<(), rusqlite::Error> {
-    conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.pragma_update(None, "synchronous", "NORMAL")?;
-    conn.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS schema_info(version INTEGER NOT NULL);
-        INSERT INTO schema_info(version) SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM schema_info);
-        CREATE TABLE IF NOT EXISTS memories(
-          id TEXT PRIMARY KEY, namespace TEXT NOT NULL, workspace_id TEXT NOT NULL, kind TEXT NOT NULL,
-          content TEXT NOT NULL, normalized_content TEXT NOT NULL, status TEXT NOT NULL,
-          sensitivity TEXT NOT NULL, scope TEXT NOT NULL, importance REAL NOT NULL, confidence REAL NOT NULL,
-          created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, last_accessed_at INTEGER,
-          access_count INTEGER NOT NULL DEFAULT 0, valid_from INTEGER, valid_until INTEGER, supersedes_id TEXT,
-          content_hash TEXT NOT NULL, pinned INTEGER NOT NULL DEFAULT 0, metadata_json TEXT NOT NULL DEFAULT '{}'
-        );
-        CREATE INDEX IF NOT EXISTS idx_memories_lookup
-          ON memories(namespace,workspace_id,status,pinned,importance);
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_active_hash
-          ON memories(namespace,workspace_id,content_hash) WHERE status='ACTIVE';
-
-        CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-          id UNINDEXED, namespace UNINDEXED, workspace_id UNINDEXED, content, normalized_content,
-          tokenize='unicode61'
-        );
-        CREATE TRIGGER IF NOT EXISTS memories_fts_insert AFTER INSERT ON memories BEGIN
-          INSERT INTO memories_fts(rowid,id,namespace,workspace_id,content,normalized_content)
-          VALUES(new.rowid,new.id,new.namespace,new.workspace_id,new.content,new.normalized_content);
-        END;
-        CREATE TRIGGER IF NOT EXISTS memories_fts_delete AFTER DELETE ON memories BEGIN
-          DELETE FROM memories_fts WHERE rowid=old.rowid;
-        END;
-        CREATE TRIGGER IF NOT EXISTS memories_fts_update AFTER UPDATE ON memories BEGIN
-          DELETE FROM memories_fts WHERE rowid=old.rowid;
-          INSERT INTO memories_fts(rowid,id,namespace,workspace_id,content,normalized_content)
-          VALUES(new.rowid,new.id,new.namespace,new.workspace_id,new.content,new.normalized_content);
-        END;
-
-        CREATE TABLE IF NOT EXISTS corrections(
-          id TEXT PRIMARY KEY, namespace TEXT NOT NULL, workspace_id TEXT NOT NULL,
-          context TEXT NOT NULL, predicted TEXT NOT NULL, corrected TEXT NOT NULL,
-          reason TEXT, source TEXT NOT NULL, applied_count INTEGER NOT NULL DEFAULT 0,
-          created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_corrections_scope
-          ON corrections(namespace,workspace_id,applied_count,updated_at);
-        CREATE VIRTUAL TABLE IF NOT EXISTS corrections_fts USING fts5(
-          id UNINDEXED, context, predicted, corrected, reason, tokenize='unicode61'
-        );
-        CREATE TRIGGER IF NOT EXISTS corrections_fts_insert AFTER INSERT ON corrections BEGIN
-          INSERT INTO corrections_fts(rowid,id,context,predicted,corrected,reason)
-          VALUES(new.rowid,new.id,new.context,new.predicted,new.corrected,COALESCE(new.reason,''));
-        END;
-        CREATE TRIGGER IF NOT EXISTS corrections_fts_delete AFTER DELETE ON corrections BEGIN
-          DELETE FROM corrections_fts WHERE rowid=old.rowid;
-        END;
-        CREATE TRIGGER IF NOT EXISTS corrections_fts_update AFTER UPDATE ON corrections BEGIN
-          DELETE FROM corrections_fts WHERE rowid=old.rowid;
-          INSERT INTO corrections_fts(rowid,id,context,predicted,corrected,reason)
-          VALUES(new.rowid,new.id,new.context,new.predicted,new.corrected,COALESCE(new.reason,''));
-        END;
-
-        CREATE TABLE IF NOT EXISTS concepts(
-          id TEXT PRIMARY KEY, namespace TEXT NOT NULL, workspace_id TEXT NOT NULL,
-          name TEXT NOT NULL, definition TEXT NOT NULL, confidence REAL NOT NULL,
-          revision INTEGER NOT NULL DEFAULT 1, labels_json TEXT NOT NULL DEFAULT '[]',
-          source_memory_ids_json TEXT NOT NULL DEFAULT '[]',
-          created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-          UNIQUE(namespace,workspace_id,name)
-        );
-        CREATE INDEX IF NOT EXISTS idx_concepts_scope
-          ON concepts(namespace,workspace_id,confidence,updated_at);
-        CREATE VIRTUAL TABLE IF NOT EXISTS concepts_fts USING fts5(
-          id UNINDEXED, name, definition, labels, tokenize='unicode61'
-        );
-        CREATE TRIGGER IF NOT EXISTS concepts_fts_insert AFTER INSERT ON concepts BEGIN
-          INSERT INTO concepts_fts(rowid,id,name,definition,labels)
-          VALUES(new.rowid,new.id,new.name,new.definition,new.labels_json);
-        END;
-        CREATE TRIGGER IF NOT EXISTS concepts_fts_delete AFTER DELETE ON concepts BEGIN
-          DELETE FROM concepts_fts WHERE rowid=old.rowid;
-        END;
-        CREATE TRIGGER IF NOT EXISTS concepts_fts_update AFTER UPDATE ON concepts BEGIN
-          DELETE FROM concepts_fts WHERE rowid=old.rowid;
-          INSERT INTO concepts_fts(rowid,id,name,definition,labels)
-          VALUES(new.rowid,new.id,new.name,new.definition,new.labels_json);
-        END;
-
-        CREATE TABLE IF NOT EXISTS concept_links(
-          id TEXT PRIMARY KEY, namespace TEXT NOT NULL, workspace_id TEXT NOT NULL,
-          source_id TEXT NOT NULL, target_id TEXT NOT NULL, relation TEXT NOT NULL,
-          weight REAL NOT NULL, created_at INTEGER NOT NULL,
-          UNIQUE(namespace,workspace_id,source_id,target_id,relation),
-          CHECK(source_id<>target_id),
-          FOREIGN KEY(source_id) REFERENCES concepts(id) ON DELETE CASCADE,
-          FOREIGN KEY(target_id) REFERENCES concepts(id) ON DELETE CASCADE
-        );
-        CREATE INDEX IF NOT EXISTS idx_concept_links_source
-          ON concept_links(namespace,workspace_id,source_id);
-        CREATE INDEX IF NOT EXISTS idx_concept_links_target
-          ON concept_links(namespace,workspace_id,target_id);
-        "#,
-    )?;
-
-    let current = conn
-        .query_row("SELECT version FROM schema_info LIMIT 1", [], |row| {
-            row.get::<_, i64>(0)
-        })
-        .unwrap_or(1);
-    if current < 2 {
-        conn.execute_batch(
-            r#"
-            DELETE FROM memories_fts;
-            INSERT INTO memories_fts(rowid,id,namespace,workspace_id,content,normalized_content)
-              SELECT rowid,id,namespace,workspace_id,content,normalized_content FROM memories;
-            DELETE FROM corrections_fts;
-            INSERT INTO corrections_fts(rowid,id,context,predicted,corrected,reason)
-              SELECT rowid,id,context,predicted,corrected,COALESCE(reason,'') FROM corrections;
-            DELETE FROM concepts_fts;
-            INSERT INTO concepts_fts(rowid,id,name,definition,labels)
-              SELECT rowid,id,name,definition,labels_json FROM concepts;
-            "#,
-        )?;
-    }
-    if current < 3 {
-        let has_valid_from = {
-            let mut stmt = conn.prepare("PRAGMA table_info(memories)")?;
-            let columns = stmt
-                .query_map([], |row| row.get::<_, String>(1))?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            columns.iter().any(|name| name == "valid_from")
-        };
-        if !has_valid_from {
-            conn.execute("ALTER TABLE memories ADD COLUMN valid_from INTEGER", [])?;
-        }
-        conn.execute(
-            "UPDATE memories SET valid_from=created_at WHERE valid_from IS NULL",
-            [],
-        )?;
-    }
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_memories_temporal_lookup          ON memories(namespace,workspace_id,status,valid_from,valid_until,pinned,importance)",
-        [],
-    )?;
-    if current < STORE_SCHEMA_VERSION {
-        conn.execute("UPDATE schema_info SET version=?1", [STORE_SCHEMA_VERSION])?;
-    }
-    Ok(())
+fn migrate(conn:&mut Connection)->std::result::Result<(),rusqlite::Error>{
+ conn.pragma_update(None,"journal_mode","WAL")?;conn.pragma_update(None,"synchronous","NORMAL")?;
+ let tx=conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+ tx.execute_batch(r#"CREATE TABLE IF NOT EXISTS schema_info(version INTEGER NOT NULL);INSERT INTO schema_info(version) SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM schema_info);
+ CREATE TABLE IF NOT EXISTS memories(id TEXT PRIMARY KEY,namespace TEXT NOT NULL,workspace_id TEXT NOT NULL,kind TEXT NOT NULL,content TEXT NOT NULL,normalized_content TEXT NOT NULL,status TEXT NOT NULL,sensitivity TEXT NOT NULL,scope TEXT NOT NULL,scope_key TEXT,importance REAL NOT NULL,confidence REAL NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,last_accessed_at INTEGER,access_count INTEGER NOT NULL DEFAULT 0,valid_from INTEGER,valid_until INTEGER,supersedes_id TEXT,content_hash TEXT NOT NULL,pinned INTEGER NOT NULL DEFAULT 0,metadata_json TEXT NOT NULL DEFAULT '{}');
+ CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(id UNINDEXED,namespace UNINDEXED,workspace_id UNINDEXED,content,normalized_content,tokenize='unicode61');
+ CREATE TABLE IF NOT EXISTS corrections(id TEXT PRIMARY KEY,namespace TEXT NOT NULL,workspace_id TEXT NOT NULL,context TEXT NOT NULL,predicted TEXT NOT NULL,corrected TEXT NOT NULL,reason TEXT,source TEXT NOT NULL,sensitivity TEXT NOT NULL DEFAULT 'private',source_memory_ids_json TEXT NOT NULL DEFAULT '[]',applied_count INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
+ CREATE VIRTUAL TABLE IF NOT EXISTS corrections_fts USING fts5(id UNINDEXED,context,predicted,corrected,reason,tokenize='unicode61');
+ CREATE TABLE IF NOT EXISTS concepts(id TEXT PRIMARY KEY,namespace TEXT NOT NULL,workspace_id TEXT NOT NULL,name TEXT NOT NULL,definition TEXT NOT NULL,confidence REAL NOT NULL,sensitivity TEXT NOT NULL DEFAULT 'private',revision INTEGER NOT NULL DEFAULT 1,labels_json TEXT NOT NULL DEFAULT '[]',source_memory_ids_json TEXT NOT NULL DEFAULT '[]',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(namespace,workspace_id,name));
+ CREATE VIRTUAL TABLE IF NOT EXISTS concepts_fts USING fts5(id UNINDEXED,name,definition,labels,tokenize='unicode61');
+ CREATE TABLE IF NOT EXISTS concept_links(id TEXT PRIMARY KEY,namespace TEXT NOT NULL,workspace_id TEXT NOT NULL,source_id TEXT NOT NULL,target_id TEXT NOT NULL,relation TEXT NOT NULL,weight REAL NOT NULL,created_at INTEGER NOT NULL,UNIQUE(namespace,workspace_id,source_id,target_id,relation),CHECK(source_id<>target_id),CHECK(weight>=0.0 AND weight<=1.0),FOREIGN KEY(source_id) REFERENCES concepts(id) ON DELETE CASCADE,FOREIGN KEY(target_id) REFERENCES concepts(id) ON DELETE CASCADE);"#)?;
+ let current=tx.query_row("SELECT version FROM schema_info LIMIT 1",[],|r|r.get::<_,i64>(0))?;if current>STORE_SCHEMA_VERSION{return Err(rusqlite::Error::InvalidQuery);}
+ if current<2{tx.execute_batch(r#"DELETE FROM memories_fts;INSERT INTO memories_fts(rowid,id,namespace,workspace_id,content,normalized_content) SELECT rowid,id,namespace,workspace_id,content,normalized_content FROM memories;DELETE FROM corrections_fts;INSERT INTO corrections_fts(rowid,id,context,predicted,corrected,reason) SELECT rowid,id,context,predicted,corrected,COALESCE(reason,'') FROM corrections;DELETE FROM concepts_fts;INSERT INTO concepts_fts(rowid,id,name,definition,labels) SELECT rowid,id,name,definition,labels_json FROM concepts;"#)?;}
+ if current<3{if !table_has_column(&tx,"memories","valid_from")?{tx.execute("ALTER TABLE memories ADD COLUMN valid_from INTEGER",[])?;}tx.execute("UPDATE memories SET valid_from=created_at WHERE valid_from IS NULL",[])?;}
+ if current<4{
+  if !table_has_column(&tx,"memories","scope_key")?{tx.execute("ALTER TABLE memories ADD COLUMN scope_key TEXT",[])?;}
+  if !table_has_column(&tx,"corrections","sensitivity")?{tx.execute("ALTER TABLE corrections ADD COLUMN sensitivity TEXT NOT NULL DEFAULT 'private'",[])?;}
+  if !table_has_column(&tx,"corrections","source_memory_ids_json")?{tx.execute("ALTER TABLE corrections ADD COLUMN source_memory_ids_json TEXT NOT NULL DEFAULT '[]'",[])?;}
+  if !table_has_column(&tx,"concepts","sensitivity")?{tx.execute("ALTER TABLE concepts ADD COLUMN sensitivity TEXT NOT NULL DEFAULT 'private'",[])?;}
+  tx.execute("UPDATE memories SET scope_key='legacy' WHERE scope='conversation' AND scope_key IS NULL",[])?;
+  tx.execute_batch(r#"WITH ranked AS(SELECT id,FIRST_VALUE(id) OVER(PARTITION BY namespace,kind,content_hash ORDER BY pinned DESC,importance DESC,updated_at DESC,id) keeper,ROW_NUMBER() OVER(PARTITION BY namespace,kind,content_hash ORDER BY pinned DESC,importance DESC,updated_at DESC,id) rn FROM memories WHERE status='ACTIVE' AND scope='global') UPDATE memories SET status='SUPERSEDED',supersedes_id=(SELECT keeper FROM ranked WHERE ranked.id=memories.id),valid_until=CASE WHEN valid_until IS NULL OR valid_until>unixepoch() THEN unixepoch() ELSE valid_until END WHERE id IN(SELECT id FROM ranked WHERE rn>1);UPDATE memories SET workspace_id='global' WHERE scope='global';"#)?;
+ }
+ tx.execute_batch(r#"DROP INDEX IF EXISTS idx_memories_active_hash;DROP INDEX IF EXISTS idx_memories_lookup;DROP INDEX IF EXISTS idx_memories_temporal_lookup;
+ CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_active_identity ON memories(namespace,workspace_id,scope,COALESCE(scope_key,''),kind,content_hash) WHERE status='ACTIVE';
+ CREATE INDEX idx_memories_lookup ON memories(namespace,workspace_id,scope,status,pinned,importance);CREATE INDEX idx_memories_temporal_lookup ON memories(namespace,workspace_id,scope,scope_key,status,valid_from,valid_until,pinned,importance);
+ CREATE INDEX IF NOT EXISTS idx_corrections_scope ON corrections(namespace,workspace_id,applied_count,updated_at);CREATE INDEX IF NOT EXISTS idx_concepts_scope ON concepts(namespace,workspace_id,confidence,updated_at);CREATE INDEX IF NOT EXISTS idx_concept_links_source ON concept_links(namespace,workspace_id,source_id);CREATE INDEX IF NOT EXISTS idx_concept_links_target ON concept_links(namespace,workspace_id,target_id);
+ DROP TRIGGER IF EXISTS memories_fts_insert;DROP TRIGGER IF EXISTS memories_fts_delete;DROP TRIGGER IF EXISTS memories_fts_update;
+ CREATE TRIGGER memories_fts_insert AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(rowid,id,namespace,workspace_id,content,normalized_content) VALUES(new.rowid,new.id,new.namespace,new.workspace_id,new.content,new.normalized_content);END;
+ CREATE TRIGGER memories_fts_delete AFTER DELETE ON memories BEGIN DELETE FROM memories_fts WHERE rowid=old.rowid;END;
+ CREATE TRIGGER memories_fts_update AFTER UPDATE OF content,normalized_content ON memories BEGIN DELETE FROM memories_fts WHERE rowid=old.rowid;INSERT INTO memories_fts(rowid,id,namespace,workspace_id,content,normalized_content) VALUES(new.rowid,new.id,new.namespace,new.workspace_id,new.content,new.normalized_content);END;
+ DROP TRIGGER IF EXISTS memories_validate_insert;DROP TRIGGER IF EXISTS memories_validate_update;
+ CREATE TRIGGER memories_validate_insert BEFORE INSERT ON memories BEGIN SELECT RAISE(ABORT,'invalid memory status') WHERE NEW.status NOT IN('ACTIVE','SUPERSEDED','ARCHIVED');SELECT RAISE(ABORT,'invalid sensitivity') WHERE NEW.sensitivity NOT IN('public','personal','private','secret','ephemeral');SELECT RAISE(ABORT,'invalid scope') WHERE NEW.scope NOT IN('global','workspace','conversation');SELECT RAISE(ABORT,'invalid score') WHERE NEW.importance<0 OR NEW.importance>1 OR NEW.confidence<0 OR NEW.confidence>1;SELECT RAISE(ABORT,'invalid conversation scope_key') WHERE NEW.scope='conversation' AND(NEW.scope_key IS NULL OR trim(NEW.scope_key)='');SELECT RAISE(ABORT,'invalid interval') WHERE NEW.valid_until IS NOT NULL AND NEW.valid_from IS NOT NULL AND NEW.valid_until<NEW.valid_from;SELECT RAISE(ABORT,'negative access_count') WHERE NEW.access_count<0;END;
+ CREATE TRIGGER memories_validate_update BEFORE UPDATE ON memories BEGIN SELECT RAISE(ABORT,'invalid memory status') WHERE NEW.status NOT IN('ACTIVE','SUPERSEDED','ARCHIVED');SELECT RAISE(ABORT,'invalid sensitivity') WHERE NEW.sensitivity NOT IN('public','personal','private','secret','ephemeral');SELECT RAISE(ABORT,'invalid scope') WHERE NEW.scope NOT IN('global','workspace','conversation');SELECT RAISE(ABORT,'invalid score') WHERE NEW.importance<0 OR NEW.importance>1 OR NEW.confidence<0 OR NEW.confidence>1;SELECT RAISE(ABORT,'invalid conversation scope_key') WHERE NEW.scope='conversation' AND(NEW.scope_key IS NULL OR trim(NEW.scope_key)='');SELECT RAISE(ABORT,'invalid interval') WHERE NEW.valid_until IS NOT NULL AND NEW.valid_from IS NOT NULL AND NEW.valid_until<NEW.valid_from;SELECT RAISE(ABORT,'negative access_count') WHERE NEW.access_count<0;END;
+ DROP TRIGGER IF EXISTS corrections_fts_insert;DROP TRIGGER IF EXISTS corrections_fts_delete;DROP TRIGGER IF EXISTS corrections_fts_update;CREATE TRIGGER corrections_fts_insert AFTER INSERT ON corrections BEGIN INSERT INTO corrections_fts(rowid,id,context,predicted,corrected,reason) VALUES(new.rowid,new.id,new.context,new.predicted,new.corrected,COALESCE(new.reason,''));END;CREATE TRIGGER corrections_fts_delete AFTER DELETE ON corrections BEGIN DELETE FROM corrections_fts WHERE rowid=old.rowid;END;CREATE TRIGGER corrections_fts_update AFTER UPDATE OF context,predicted,corrected,reason ON corrections BEGIN DELETE FROM corrections_fts WHERE rowid=old.rowid;INSERT INTO corrections_fts(rowid,id,context,predicted,corrected,reason) VALUES(new.rowid,new.id,new.context,new.predicted,new.corrected,COALESCE(new.reason,''));END;
+ DROP TRIGGER IF EXISTS concepts_fts_insert;DROP TRIGGER IF EXISTS concepts_fts_delete;DROP TRIGGER IF EXISTS concepts_fts_update;CREATE TRIGGER concepts_fts_insert AFTER INSERT ON concepts BEGIN INSERT INTO concepts_fts(rowid,id,name,definition,labels) VALUES(new.rowid,new.id,new.name,new.definition,new.labels_json);END;CREATE TRIGGER concepts_fts_delete AFTER DELETE ON concepts BEGIN DELETE FROM concepts_fts WHERE rowid=old.rowid;END;CREATE TRIGGER concepts_fts_update AFTER UPDATE OF name,definition,labels_json ON concepts BEGIN DELETE FROM concepts_fts WHERE rowid=old.rowid;INSERT INTO concepts_fts(rowid,id,name,definition,labels) VALUES(new.rowid,new.id,new.name,new.definition,new.labels_json);END;"#)?;
+ if current<STORE_SCHEMA_VERSION{tx.execute("UPDATE schema_info SET version=?1",[STORE_SCHEMA_VERSION])?;}tx.commit()?;Ok(())
 }
+fn table_has_column(conn:&Connection,table:&str,column:&str)->std::result::Result<bool,rusqlite::Error>{let sql=format!("PRAGMA table_info({table})");let mut stmt=conn.prepare(&sql)?;let names=stmt.query_map([],|r|r.get::<_,String>(1))?.collect::<std::result::Result<Vec<_>,_>>()?;Ok(names.iter().any(|n|n==column))}
 
 fn json_storage(error: serde_json::Error) -> MemoryError {
     MemoryError::Storage(error.to_string())
@@ -1321,6 +1109,8 @@ mod tests {
                 corrected: "use an additive migration".into(),
                 reason: Some("preserve production data".into()),
                 source: "user".into(),
+            sensitivity: Sensitivity::Private,
+            source_memory_ids: Vec::new(),
             })
             .unwrap();
         assert!(store.mark_correction_applied(&correction.id).unwrap());
@@ -1337,6 +1127,7 @@ mod tests {
                 name: "operation-service".into(),
                 definition: "Owns operation settlement".into(),
                 confidence: 0.9,
+                sensitivity: Sensitivity::Private,
                 labels: vec!["domain:operations".into()],
                 source_memory_ids: Vec::new(),
             })
@@ -1348,6 +1139,7 @@ mod tests {
                 name: "settlement-worker".into(),
                 definition: "Runs scheduled settlement".into(),
                 confidence: 0.8,
+                sensitivity: Sensitivity::Private,
                 labels: vec!["type:worker".into()],
                 source_memory_ids: Vec::new(),
             })
@@ -1444,6 +1236,7 @@ mod tests {
                 name: "operation-service".into(),
                 definition: "Owns settlement orchestration".into(),
                 confidence: 0.9,
+                sensitivity: Sensitivity::Private,
                 labels: vec!["domain:operations".into()],
                 source_memory_ids: Vec::new(),
             })
@@ -1455,6 +1248,7 @@ mod tests {
                 name: "settlement-worker".into(),
                 definition: "Executes scheduled settlement".into(),
                 confidence: 0.8,
+                sensitivity: Sensitivity::Private,
                 labels: vec!["type:worker".into()],
                 source_memory_ids: Vec::new(),
             })
@@ -1466,6 +1260,7 @@ mod tests {
                 name: "settlement-ledger".into(),
                 definition: "Stores settlement state".into(),
                 confidence: 0.8,
+                sensitivity: Sensitivity::Private,
                 labels: vec!["type:storage".into()],
                 source_memory_ids: Vec::new(),
             })
