@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 - 2026-09-27
+
+- Clarify the 0.2.x ownership contract: shared memory is an interoperability data plane, not a daemon-availability-selected replacement for product-owned durable state.
+- Document Agent CLI 0.74.4 mirroring/merged-recall behavior and Markdown recovery-only semantics.
+- Align compatibility documentation terminology with schema-v4 / 0.2.x behavior.
+
+
 ## 0.2.0 - 2026-09-26
 
 - Add schema v4 with conversation `scope_key` isolation and point-in-time `as_of` recall.
