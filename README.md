@@ -27,6 +27,9 @@ K.I.T.T. Memory is the shared persistent memory data plane used across the ecosy
 - Shared concepts and weighted typed knowledge links without coupling the memory crate to Agent session semantics.
 - Temporal memory validity with `valid_from` / `valid_until`, point-in-time recall and validity-closing supersession.
 - Bounded concept-neighborhood expansion (up to four hops) for graph-aware retrieval.
+- Hierarchical context nodes with summary/navigation layers, dirty propagation and FTS-backed branch discovery.
+- Typed memory provenance, durable consolidation ChangeSets and recall traces.
+- Versioned product/plugin memory schemas without expanding the built-in memory-kind enum.
 - Namespace, global/workspace and conversation scoping with explicit `scope_key` isolation.
 - Sensitivity levels: `public`, `personal`, `private`, `secret`, `ephemeral`.
 - Monotonic sensitivity enforcement on upsert, import and deduplication.
@@ -227,3 +230,33 @@ Corrections and concepts retain sensitivity and source-memory provenance. Derive
 Version 0.2.1 clarifies the ecosystem authority boundary without changing schema v4: `kitt-memory` is the shared structured data plane, while a consuming product remains responsible for its own durable product-originated state. Consumers must merge shared recall with their local authoritative records rather than switching authorities based on daemon availability. Markdown projections/recovery files are not structured memory authorities.
 
 For Agent CLI 0.74.4+, Agent-originated project memories are committed to the Agent structured store first and mirrored to `kitt-memory` when the resident service is available. This makes shared-memory availability additive and prevents reconnects from hiding locally durable knowledge.
+
+
+## 0.3 semantic context architecture
+
+Schema v5 adds a semantic navigation layer above the existing memory records. Context nodes are projections and indexes; they do not replace `memories` as the durable shared-memory authority.
+
+A node stores a short summary, navigation summary, generation, content digest and bounded freshness counters. Consumers can search nodes first and only expand the most relevant branches before running the existing FTS/retention/graph/semantic ranking pipeline.
+
+```text
+query
+  -> context node search
+  -> relevant branches
+  -> memory FTS + retention
+  -> concept neighborhood
+  -> optional semantic rerank
+  -> token budget
+```
+
+### Provenance and audit
+
+`memory_sources` records where a memory came from, including source kind/id, optional `kitt://` URI, digest and revision. `memory_change_sets` and `memory_changes` keep the before/after/evidence trail of consolidation operations. `recall_traces` make selection/fallback/token behavior inspectable without storing model chain-of-thought.
+
+### Freshness
+
+Context nodes accumulate `dirty_children` and expose a deterministic dirty ratio. A worker or consumer decides when to regenerate summaries; the memory hot path only records freshness. This keeps expensive summarization outside normal recall.
+
+### Extensible schemas
+
+The schema registry lets a product or plugin define specialized memory shapes, retention and merge policies while retaining a built-in base kind and default sensitivity. Registration is data-driven and versioned.
+

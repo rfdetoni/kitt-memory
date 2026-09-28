@@ -7,6 +7,7 @@ use uuid::Uuid;
 pub mod baseline;
 pub mod knowledge;
 pub mod ranking;
+pub mod semantic;
 
 pub use baseline::{BaselineEntry, BaselineQuery, MemoryBaseline, build_memory_baseline};
 pub use knowledge::{
@@ -16,6 +17,10 @@ pub use knowledge::{
 pub use ranking::{
     MergeAssessment, MergeCandidate, MergeDisposition, SemanticReranker, SemanticScore,
     assess_merge_candidate, lexical_similarity, retention_score,
+};
+pub use semantic::{
+    ContextNode, MemoryChange, MemoryChangeSet, MemorySchemaDefinition, MemorySource,
+    NewContextNode, NewMemorySource, RecallTrace, SemanticMemoryStore,
 };
 
 #[derive(Debug, Error)]

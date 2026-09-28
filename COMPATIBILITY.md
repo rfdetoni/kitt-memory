@@ -50,3 +50,10 @@ The migration direction is therefore one-way: reusable durable knowledge moves t
 ## v0.2.0 scope/privacy hardening
 
 Schema v4 adds explicit conversation `scope_key`, point-in-time `as_of` retrieval, atomic sensitivity preservation across independent writers, scope/kind-aware exact deduplication, pre-limit sensitivity filtering and provenance/sensitivity for corrections and concepts. Existing schema v3 databases migrate in place. Legacy conversation rows receive the isolated key `legacy`.
+
+
+## 0.3 semantic hierarchy and provenance
+
+Version 0.3 adds schema-v5 context nodes, provenance, ChangeSets, recall traces and schema registrations as additive shared-data-plane capabilities. Existing Agent-owned durable records remain authoritative for Agent-originated project state. Context nodes are navigation projections, not a new competing authority, and shared-memory availability still must not determine whether Agent-local memories are visible.
+
+Consumers that understand 0.3 can progressively retrieve context-node summaries before normal recall, attach provenance to mirrored memories and persist consolidation audit records. Older consumers can continue using the v0.2 MemoryStore APIs against the same database.

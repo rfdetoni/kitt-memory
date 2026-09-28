@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0 - 2026-09-28
+
+- Add hierarchical context nodes with bounded freshness counters and FTS-backed branch discovery.
+- Add explicit memory-to-context links without changing the authority of existing MemoryRecord rows.
+- Add typed provenance records linking memories to sessions, task episodes, tool results, repository revisions, tests and other resources.
+- Add durable MemoryChangeSet/MemoryChange audit history for consolidation and supersession decisions.
+- Add durable recall traces for explainability, token accounting, fallback tracking and context hashes.
+- Add a versioned MemorySchema registry so plugins/products can define specialized memory payloads without growing the core enum.
+- Migrate SQLite schema to v5 and backfill legacy memories into per-workspace root context nodes.
+- Preserve local SQLite/FTS5 authority, monotonic sensitivity and the Agent/shared-memory authority boundary.
+
+
 ## 0.2.1 - 2026-09-27
 
 - Clarify the 0.2.x ownership contract: shared memory is an interoperability data plane, not a daemon-availability-selected replacement for product-owned durable state.

@@ -3,7 +3,8 @@ use kitt_memory_core::{
     MemoryBaseline, MemoryError, MemoryKind, MemoryRecord, MemoryScope, MemoryStatus, MemoryStore,
     MergeCandidate, MergeDisposition, NewConcept, NewCorrection, NewMemory, RecallQuery, Result,
     SemanticReranker, Sensitivity, StoredConcept, assess_merge_candidate, build_memory_baseline,
-    now_epoch,
+    now_epoch, ContextNode, MemoryChange, MemoryChangeSet, MemorySchemaDefinition, MemorySource,
+    NewContextNode, NewMemorySource, RecallTrace, SemanticMemoryStore,
 };
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, TransactionBehavior, params, types::Type,
@@ -19,7 +20,9 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-const STORE_SCHEMA_VERSION: i64 = 4;
+mod semantic;
+
+const STORE_SCHEMA_VERSION: i64 = 5;
 const MEMORY_COLUMNS: &str = "m.id,m.namespace,m.workspace_id,m.kind,m.content,m.normalized_content,m.status,m.sensitivity,m.scope,m.scope_key,m.importance,m.confidence,m.created_at,m.updated_at,m.last_accessed_at,m.access_count,m.valid_from,m.valid_until,m.supersedes_id,m.content_hash,m.pinned,m.metadata_json";
 
 fn ensure_private_database_file(path: &Path) -> Result<()> {
@@ -1128,7 +1131,15 @@ fn migrate(conn: &mut Connection) -> std::result::Result<(), rusqlite::Error> {
  CREATE VIRTUAL TABLE IF NOT EXISTS corrections_fts USING fts5(id UNINDEXED,context,predicted,corrected,reason,tokenize='unicode61');
  CREATE TABLE IF NOT EXISTS concepts(id TEXT PRIMARY KEY,namespace TEXT NOT NULL,workspace_id TEXT NOT NULL,name TEXT NOT NULL,definition TEXT NOT NULL,confidence REAL NOT NULL,sensitivity TEXT NOT NULL DEFAULT 'private',revision INTEGER NOT NULL DEFAULT 1,labels_json TEXT NOT NULL DEFAULT '[]',source_memory_ids_json TEXT NOT NULL DEFAULT '[]',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(namespace,workspace_id,name));
  CREATE VIRTUAL TABLE IF NOT EXISTS concepts_fts USING fts5(id UNINDEXED,name,definition,labels,tokenize='unicode61');
- CREATE TABLE IF NOT EXISTS concept_links(id TEXT PRIMARY KEY,namespace TEXT NOT NULL,workspace_id TEXT NOT NULL,source_id TEXT NOT NULL,target_id TEXT NOT NULL,relation TEXT NOT NULL,weight REAL NOT NULL,created_at INTEGER NOT NULL,UNIQUE(namespace,workspace_id,source_id,target_id,relation),CHECK(source_id<>target_id),CHECK(weight>=0.0 AND weight<=1.0),FOREIGN KEY(source_id) REFERENCES concepts(id) ON DELETE CASCADE,FOREIGN KEY(target_id) REFERENCES concepts(id) ON DELETE CASCADE);"#)?;
+ CREATE TABLE IF NOT EXISTS concept_links(id TEXT PRIMARY KEY,namespace TEXT NOT NULL,workspace_id TEXT NOT NULL,source_id TEXT NOT NULL,target_id TEXT NOT NULL,relation TEXT NOT NULL,weight REAL NOT NULL,created_at INTEGER NOT NULL,UNIQUE(namespace,workspace_id,source_id,target_id,relation),CHECK(source_id<>target_id),CHECK(weight>=0.0 AND weight<=1.0),FOREIGN KEY(source_id) REFERENCES concepts(id) ON DELETE CASCADE,FOREIGN KEY(target_id) REFERENCES concepts(id) ON DELETE CASCADE);
+ CREATE TABLE IF NOT EXISTS context_nodes(id TEXT PRIMARY KEY,parent_id TEXT,namespace TEXT NOT NULL,workspace_id TEXT NOT NULL,path TEXT NOT NULL,summary TEXT NOT NULL DEFAULT '',navigation_summary TEXT NOT NULL DEFAULT '',generation INTEGER NOT NULL DEFAULT 1,content_hash TEXT NOT NULL DEFAULT '',dirty_children INTEGER NOT NULL DEFAULT 0,total_children INTEGER NOT NULL DEFAULT 0,summarized_at INTEGER,sensitivity TEXT NOT NULL DEFAULT 'private',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(namespace,workspace_id,path),FOREIGN KEY(parent_id) REFERENCES context_nodes(id) ON DELETE CASCADE);
+ CREATE VIRTUAL TABLE IF NOT EXISTS context_nodes_fts USING fts5(id UNINDEXED,namespace UNINDEXED,workspace_id UNINDEXED,path,summary,navigation_summary,tokenize='unicode61');
+ CREATE TABLE IF NOT EXISTS memory_context_links(memory_id TEXT NOT NULL,context_node_id TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(memory_id,context_node_id),FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE,FOREIGN KEY(context_node_id) REFERENCES context_nodes(id) ON DELETE CASCADE);
+ CREATE TABLE IF NOT EXISTS memory_sources(id TEXT PRIMARY KEY,memory_id TEXT NOT NULL,source_kind TEXT NOT NULL,source_id TEXT NOT NULL,source_uri TEXT,source_digest TEXT,relationship TEXT NOT NULL,source_revision TEXT,observed_at INTEGER NOT NULL,valid_from INTEGER,valid_until INTEGER,UNIQUE(memory_id,source_kind,source_id,relationship,COALESCE(source_revision,'')),FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE);
+ CREATE TABLE IF NOT EXISTS memory_change_sets(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,origin_type TEXT NOT NULL,origin_id TEXT NOT NULL,started_at INTEGER NOT NULL,committed_at INTEGER,model TEXT,reason TEXT NOT NULL,status TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS memory_changes(id TEXT PRIMARY KEY,change_set_id TEXT NOT NULL,memory_id TEXT,operation TEXT NOT NULL,before_json TEXT,after_json TEXT,evidence_json TEXT NOT NULL DEFAULT '[]',reason_code TEXT NOT NULL,FOREIGN KEY(change_set_id) REFERENCES memory_change_sets(id) ON DELETE CASCADE);
+ CREATE TABLE IF NOT EXISTS recall_traces(id TEXT PRIMARY KEY,namespace TEXT NOT NULL,workspace_id TEXT NOT NULL,query TEXT NOT NULL,planned_scopes_json TEXT NOT NULL,candidates_json TEXT NOT NULL,selected_json TEXT NOT NULL,token_cost INTEGER NOT NULL,semantic_fallback INTEGER NOT NULL,elapsed_us INTEGER NOT NULL,context_hash TEXT NOT NULL,created_at INTEGER NOT NULL);
+ CREATE TABLE IF NOT EXISTS memory_schemas(schema_id TEXT NOT NULL,version INTEGER NOT NULL,base_kind TEXT NOT NULL,fields_schema_json TEXT NOT NULL,retention_policy_json TEXT NOT NULL,merge_policy_json TEXT NOT NULL,default_sensitivity TEXT NOT NULL,index_fields_json TEXT NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(schema_id,version));"#)?;
     let current = tx.query_row("SELECT version FROM schema_info LIMIT 1", [], |r| {
         r.get::<_, i64>(0)
     })?;
@@ -1172,6 +1183,10 @@ fn migrate(conn: &mut Connection) -> std::result::Result<(), rusqlite::Error> {
     tx.execute_batch(r#"DROP INDEX IF EXISTS idx_memories_active_hash;DROP INDEX IF EXISTS idx_memories_lookup;DROP INDEX IF EXISTS idx_memories_temporal_lookup;
  CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_active_identity ON memories(namespace,workspace_id,scope,COALESCE(scope_key,''),kind,content_hash) WHERE status='ACTIVE';
  CREATE INDEX idx_memories_lookup ON memories(namespace,workspace_id,scope,status,pinned,importance);CREATE INDEX idx_memories_temporal_lookup ON memories(namespace,workspace_id,scope,scope_key,status,valid_from,valid_until,pinned,importance);
+ CREATE INDEX IF NOT EXISTS idx_context_nodes_scope ON context_nodes(namespace,workspace_id,path,generation);
+ CREATE INDEX IF NOT EXISTS idx_memory_sources_memory ON memory_sources(memory_id,observed_at);
+ CREATE INDEX IF NOT EXISTS idx_memory_change_sets_workspace ON memory_change_sets(workspace_id,started_at);
+ CREATE INDEX IF NOT EXISTS idx_recall_traces_workspace ON recall_traces(workspace_id,created_at);
  CREATE INDEX IF NOT EXISTS idx_corrections_scope ON corrections(namespace,workspace_id,applied_count,updated_at);CREATE INDEX IF NOT EXISTS idx_concepts_scope ON concepts(namespace,workspace_id,confidence,updated_at);CREATE INDEX IF NOT EXISTS idx_concept_links_source ON concept_links(namespace,workspace_id,source_id);CREATE INDEX IF NOT EXISTS idx_concept_links_target ON concept_links(namespace,workspace_id,target_id);
  DROP TRIGGER IF EXISTS memories_fts_insert;DROP TRIGGER IF EXISTS memories_fts_delete;DROP TRIGGER IF EXISTS memories_fts_update;
  CREATE TRIGGER memories_fts_insert AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(rowid,id,namespace,workspace_id,content,normalized_content) VALUES(new.rowid,new.id,new.namespace,new.workspace_id,new.content,new.normalized_content);END;
@@ -1181,7 +1196,21 @@ fn migrate(conn: &mut Connection) -> std::result::Result<(), rusqlite::Error> {
  CREATE TRIGGER memories_validate_insert BEFORE INSERT ON memories BEGIN SELECT RAISE(ABORT,'invalid memory status') WHERE NEW.status NOT IN('ACTIVE','SUPERSEDED','ARCHIVED');SELECT RAISE(ABORT,'invalid sensitivity') WHERE NEW.sensitivity NOT IN('public','personal','private','secret','ephemeral');SELECT RAISE(ABORT,'invalid scope') WHERE NEW.scope NOT IN('global','workspace','conversation');SELECT RAISE(ABORT,'invalid score') WHERE NEW.importance<0 OR NEW.importance>1 OR NEW.confidence<0 OR NEW.confidence>1;SELECT RAISE(ABORT,'invalid conversation scope_key') WHERE NEW.scope='conversation' AND(NEW.scope_key IS NULL OR trim(NEW.scope_key)='');SELECT RAISE(ABORT,'invalid interval') WHERE NEW.valid_until IS NOT NULL AND NEW.valid_from IS NOT NULL AND NEW.valid_until<NEW.valid_from;SELECT RAISE(ABORT,'negative access_count') WHERE NEW.access_count<0;END;
  CREATE TRIGGER memories_validate_update BEFORE UPDATE ON memories BEGIN SELECT RAISE(ABORT,'invalid memory status') WHERE NEW.status NOT IN('ACTIVE','SUPERSEDED','ARCHIVED');SELECT RAISE(ABORT,'invalid sensitivity') WHERE NEW.sensitivity NOT IN('public','personal','private','secret','ephemeral');SELECT RAISE(ABORT,'invalid scope') WHERE NEW.scope NOT IN('global','workspace','conversation');SELECT RAISE(ABORT,'invalid score') WHERE NEW.importance<0 OR NEW.importance>1 OR NEW.confidence<0 OR NEW.confidence>1;SELECT RAISE(ABORT,'invalid conversation scope_key') WHERE NEW.scope='conversation' AND(NEW.scope_key IS NULL OR trim(NEW.scope_key)='');SELECT RAISE(ABORT,'invalid interval') WHERE NEW.valid_until IS NOT NULL AND NEW.valid_from IS NOT NULL AND NEW.valid_until<NEW.valid_from;SELECT RAISE(ABORT,'negative access_count') WHERE NEW.access_count<0;END;
  DROP TRIGGER IF EXISTS corrections_fts_insert;DROP TRIGGER IF EXISTS corrections_fts_delete;DROP TRIGGER IF EXISTS corrections_fts_update;CREATE TRIGGER corrections_fts_insert AFTER INSERT ON corrections BEGIN INSERT INTO corrections_fts(rowid,id,context,predicted,corrected,reason) VALUES(new.rowid,new.id,new.context,new.predicted,new.corrected,COALESCE(new.reason,''));END;CREATE TRIGGER corrections_fts_delete AFTER DELETE ON corrections BEGIN DELETE FROM corrections_fts WHERE rowid=old.rowid;END;CREATE TRIGGER corrections_fts_update AFTER UPDATE OF context,predicted,corrected,reason ON corrections BEGIN DELETE FROM corrections_fts WHERE rowid=old.rowid;INSERT INTO corrections_fts(rowid,id,context,predicted,corrected,reason) VALUES(new.rowid,new.id,new.context,new.predicted,new.corrected,COALESCE(new.reason,''));END;
- DROP TRIGGER IF EXISTS concepts_fts_insert;DROP TRIGGER IF EXISTS concepts_fts_delete;DROP TRIGGER IF EXISTS concepts_fts_update;CREATE TRIGGER concepts_fts_insert AFTER INSERT ON concepts BEGIN INSERT INTO concepts_fts(rowid,id,name,definition,labels) VALUES(new.rowid,new.id,new.name,new.definition,new.labels_json);END;CREATE TRIGGER concepts_fts_delete AFTER DELETE ON concepts BEGIN DELETE FROM concepts_fts WHERE rowid=old.rowid;END;CREATE TRIGGER concepts_fts_update AFTER UPDATE OF name,definition,labels_json ON concepts BEGIN DELETE FROM concepts_fts WHERE rowid=old.rowid;INSERT INTO concepts_fts(rowid,id,name,definition,labels) VALUES(new.rowid,new.id,new.name,new.definition,new.labels_json);END;"#)?;
+ DROP TRIGGER IF EXISTS concepts_fts_insert;DROP TRIGGER IF EXISTS concepts_fts_delete;DROP TRIGGER IF EXISTS concepts_fts_update;CREATE TRIGGER concepts_fts_insert AFTER INSERT ON concepts BEGIN INSERT INTO concepts_fts(rowid,id,name,definition,labels) VALUES(new.rowid,new.id,new.name,new.definition,new.labels_json);END;CREATE TRIGGER concepts_fts_delete AFTER DELETE ON concepts BEGIN DELETE FROM concepts_fts WHERE rowid=old.rowid;END;CREATE TRIGGER concepts_fts_update AFTER UPDATE OF name,definition,labels_json ON concepts BEGIN DELETE FROM concepts_fts WHERE rowid=old.rowid;INSERT INTO concepts_fts(rowid,id,name,definition,labels) VALUES(new.rowid,new.id,new.name,new.definition,new.labels_json);END;
+ DROP TRIGGER IF EXISTS context_nodes_fts_insert;DROP TRIGGER IF EXISTS context_nodes_fts_delete;DROP TRIGGER IF EXISTS context_nodes_fts_update;
+ CREATE TRIGGER context_nodes_fts_insert AFTER INSERT ON context_nodes BEGIN INSERT INTO context_nodes_fts(rowid,id,namespace,workspace_id,path,summary,navigation_summary) VALUES(new.rowid,new.id,new.namespace,new.workspace_id,new.path,new.summary,new.navigation_summary);END;
+ CREATE TRIGGER context_nodes_fts_delete AFTER DELETE ON context_nodes BEGIN DELETE FROM context_nodes_fts WHERE rowid=old.rowid;END;
+ CREATE TRIGGER context_nodes_fts_update AFTER UPDATE OF path,summary,navigation_summary ON context_nodes BEGIN DELETE FROM context_nodes_fts WHERE rowid=old.rowid;INSERT INTO context_nodes_fts(rowid,id,namespace,workspace_id,path,summary,navigation_summary) VALUES(new.rowid,new.id,new.namespace,new.workspace_id,new.path,new.summary,new.navigation_summary);END;"#)?;
+    if current < 5 {
+        tx.execute_batch(r#"INSERT OR IGNORE INTO context_nodes(id,parent_id,namespace,workspace_id,path,summary,navigation_summary,generation,content_hash,dirty_children,total_children,summarized_at,sensitivity,created_at,updated_at)
+ SELECT 'ctx_'||lower(hex(randomblob(16))),NULL,namespace,workspace_id,'root','Imported memory root','Legacy memories awaiting semantic classification',1,'',0,COUNT(*),unixepoch(),MAX(sensitivity),unixepoch(),unixepoch()
+ FROM memories GROUP BY namespace,workspace_id;
+ INSERT OR IGNORE INTO memory_context_links(memory_id,context_node_id,created_at)
+ SELECT m.id,c.id,unixepoch() FROM memories m JOIN context_nodes c ON c.namespace=m.namespace AND c.workspace_id=m.workspace_id AND c.path='root';
+ DELETE FROM context_nodes_fts;
+ INSERT INTO context_nodes_fts(rowid,id,namespace,workspace_id,path,summary,navigation_summary)
+ SELECT rowid,id,namespace,workspace_id,path,summary,navigation_summary FROM context_nodes;"#)?;
+    }
     if current < STORE_SCHEMA_VERSION {
         tx.execute("UPDATE schema_info SET version=?1", [STORE_SCHEMA_VERSION])?;
     }
