@@ -445,6 +445,15 @@ fn serve_connection(mut stream: TcpStream, store: Arc<SqliteMemoryStore>, token:
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = env::args().skip(1).collect::<Vec<_>>();
+    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
+        println!("kitt-memoryd {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        println!("kitt-memoryd {}\n\nStandalone loopback memory authority for K.I.T.T.\nEnvironment: KITT_MEMORY_ADDR, KITT_MEMORY_TOKEN_PATH, KITT_MEMORY_DB", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let addr = env::var("KITT_MEMORY_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.to_string());
     if !addr.starts_with("127.0.0.1:")
         && !addr.starts_with("[::1]:")
