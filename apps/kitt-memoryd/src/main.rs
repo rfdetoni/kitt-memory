@@ -26,8 +26,6 @@ struct Envelope {
     id: String,
     kind: String,
     #[serde(default)]
-    correlation_id: Option<String>,
-    #[serde(default)]
     payload: Value,
 }
 
