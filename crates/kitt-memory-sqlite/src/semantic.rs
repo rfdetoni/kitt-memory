@@ -117,7 +117,7 @@ impl SemanticMemoryStore for SqliteMemoryStore {
     }
 
     fn link_memory_context(&self, memory_id: &str, context_node_id: &str) -> Result<()> {
-        let conn=self.writer_conn()?;
+        let conn = self.writer_conn()?;
         conn.execute(
             "INSERT OR IGNORE INTO memory_context_links(memory_id,context_node_id,created_at) VALUES(?1,?2,?3)",
             params![memory_id,context_node_id,now_epoch()],
@@ -127,7 +127,7 @@ impl SemanticMemoryStore for SqliteMemoryStore {
 
     fn record_source(&self, source: NewMemorySource) -> Result<MemorySource> {
         let source = source.into_record()?;
-        let conn=self.writer_conn()?;
+        let conn = self.writer_conn()?;
         conn.execute(
             "INSERT INTO memory_sources(id,memory_id,source_kind,source_id,source_uri,source_digest,relationship,source_revision,observed_at,valid_from,valid_until)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
@@ -194,7 +194,7 @@ impl SemanticMemoryStore for SqliteMemoryStore {
     }
 
     fn record_recall_trace(&self, trace: &RecallTrace) -> Result<()> {
-        let conn=self.writer_conn()?;
+        let conn = self.writer_conn()?;
         conn.execute(
             "INSERT OR REPLACE INTO recall_traces(id,namespace,workspace_id,query,planned_scopes_json,candidates_json,selected_json,token_cost,semantic_fallback,elapsed_us,context_hash,created_at)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
@@ -231,7 +231,7 @@ impl SemanticMemoryStore for SqliteMemoryStore {
             serde_json::from_str::<serde_json::Value>(raw)
                 .map_err(|e| MemoryError::Invalid(format!("memory schema JSON is invalid: {e}")))?;
         }
-        let conn=self.writer_conn()?;
+        let conn = self.writer_conn()?;
         conn.execute(
             "INSERT OR REPLACE INTO memory_schemas(schema_id,version,base_kind,fields_schema_json,retention_policy_json,merge_policy_json,default_sensitivity,index_fields_json,updated_at)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
