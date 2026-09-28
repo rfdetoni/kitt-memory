@@ -220,7 +220,6 @@ pub trait SemanticMemoryStore: Send + Sync {
     fn list_schemas(&self) -> Result<Vec<MemorySchemaDefinition>>;
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct DreamRunRecord {

@@ -19,8 +19,8 @@ pub use ranking::{
     assess_merge_candidate, lexical_similarity, retention_score,
 };
 pub use semantic::{
-    ContextNode, DreamRunRecord, MemoryChange, MemoryChangeSet, MemorySchemaDefinition, MemorySource,
-    NewContextNode, NewMemorySource, RecallTrace, SemanticMemoryStore,
+    ContextNode, DreamRunRecord, MemoryChange, MemoryChangeSet, MemorySchemaDefinition,
+    MemorySource, NewContextNode, NewMemorySource, RecallTrace, SemanticMemoryStore,
 };
 
 #[derive(Debug, Error)]

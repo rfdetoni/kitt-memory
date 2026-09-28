@@ -5,7 +5,10 @@ fn map_dream(row: &rusqlite::Row<'_>) -> std::result::Result<DreamRunRecord, rus
     let as_u64 = |index: usize| -> std::result::Result<u64, rusqlite::Error> {
         let value = row.get::<_, i64>(index)?;
         if value < 0 {
-            return Err(data_error(index, MemoryError::Corrupt("negative dream counter".into())));
+            return Err(data_error(
+                index,
+                MemoryError::Corrupt("negative dream counter".into()),
+            ));
         }
         Ok(value as u64)
     };
@@ -78,18 +81,26 @@ impl SqliteMemoryStore {
 
     pub fn set_pinned(&self, id: &str, pinned: bool) -> Result<bool> {
         let conn = self.writer_conn()?;
-        Ok(conn.execute(
-            "UPDATE memories SET pinned=?1,updated_at=?2 WHERE id=?3",
-            params![pinned as i64, now_epoch(), id],
-        ).map_err(storage)? > 0)
+        Ok(conn
+            .execute(
+                "UPDATE memories SET pinned=?1,updated_at=?2 WHERE id=?3",
+                params![pinned as i64, now_epoch(), id],
+            )
+            .map_err(storage)?
+            > 0)
     }
 
     pub fn touch_records(&self, ids: &[String]) -> Result<()> {
         self.touch_access(ids.iter().map(String::as_str))
     }
 
-    pub fn archive_workspace(&self, namespace: &str, workspace_id: &str) -> Result<Vec<MemoryRecord>> {
-        let active = self.list_records(namespace, workspace_id, Some(MemoryStatus::Active), 2048)?;
+    pub fn archive_workspace(
+        &self,
+        namespace: &str,
+        workspace_id: &str,
+    ) -> Result<Vec<MemoryRecord>> {
+        let active =
+            self.list_records(namespace, workspace_id, Some(MemoryStatus::Active), 2048)?;
         if active.is_empty() {
             return Ok(active);
         }
@@ -115,7 +126,9 @@ impl SqliteMemoryStore {
 
     pub fn record_dream_run(&self, run: &DreamRunRecord) -> Result<()> {
         let mut conn = self.writer_conn()?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage)?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
         insert_dream_run(&tx, run)?;
         tx.commit().map_err(storage)?;
         Ok(())
@@ -129,7 +142,9 @@ impl SqliteMemoryStore {
         sources: &[MemorySource],
     ) -> Result<()> {
         let mut conn = self.writer_conn()?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage)?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
         for memory in updated_memories.iter().chain(new_memories.iter()) {
             let memory = memory.canonicalized_for_storage()?;
             upsert_record_tx(&tx, &memory)?;
