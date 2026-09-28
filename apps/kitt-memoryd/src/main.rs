@@ -451,7 +451,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        println!("kitt-memoryd {}\n\nStandalone loopback memory authority for K.I.T.T.\nEnvironment: KITT_MEMORY_ADDR, KITT_MEMORY_TOKEN_PATH, KITT_MEMORY_DB", env!("CARGO_PKG_VERSION"));
+        println!(
+            "kitt-memoryd {}\n\nStandalone loopback memory authority for K.I.T.T.\nEnvironment: KITT_MEMORY_ADDR, KITT_MEMORY_TOKEN_PATH, KITT_MEMORY_DB",
+            env!("CARGO_PKG_VERSION")
+        );
         return Ok(());
     }
     let addr = env::var("KITT_MEMORY_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.to_string());
