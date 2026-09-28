@@ -5,7 +5,10 @@ fn map_context(row: &rusqlite::Row<'_>) -> std::result::Result<ContextNode, rusq
     let dirty = row.get::<_, i64>(9)?;
     let total = row.get::<_, i64>(10)?;
     if generation < 0 || dirty < 0 || total < 0 {
-        return Err(data_error(7, MemoryError::Corrupt("negative context counters".into())));
+        return Err(data_error(
+            7,
+            MemoryError::Corrupt("negative context counters".into()),
+        ));
     }
     Ok(ContextNode {
         id: row.get(0)?,
@@ -32,7 +35,9 @@ impl SemanticMemoryStore for SqliteMemoryStore {
     fn upsert_context_node(&self, node: NewContextNode) -> Result<ContextNode> {
         let node = node.into_record()?;
         let mut conn = self.writer_conn()?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage)?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
         tx.execute(
             "INSERT INTO context_nodes(id,parent_id,namespace,workspace_id,path,summary,navigation_summary,generation,content_hash,dirty_children,total_children,summarized_at,sensitivity,created_at,updated_at)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
@@ -48,13 +53,16 @@ impl SemanticMemoryStore for SqliteMemoryStore {
                 node.generation as i64,node.content_hash,node.dirty_children as i64,node.total_children as i64,
                 node.summarized_at,node.sensitivity.as_db(),node.created_at,node.updated_at],
         ).map_err(storage)?;
-        let id: String = tx.query_row(
-            "SELECT id FROM context_nodes WHERE namespace=?1 AND workspace_id=?2 AND path=?3",
-            params![node.namespace,node.workspace_id,node.path],
-            |row| row.get(0),
-        ).map_err(storage)?;
+        let id: String = tx
+            .query_row(
+                "SELECT id FROM context_nodes WHERE namespace=?1 AND workspace_id=?2 AND path=?3",
+                params![node.namespace, node.workspace_id, node.path],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
         tx.commit().map_err(storage)?;
-        self.context_node(&id)?.ok_or_else(|| MemoryError::Storage("context node vanished".into()))
+        self.context_node(&id)?
+            .ok_or_else(|| MemoryError::Storage("context node vanished".into()))
     }
 
     fn context_node(&self, id: &str) -> Result<Option<ContextNode>> {
@@ -63,12 +71,21 @@ impl SemanticMemoryStore for SqliteMemoryStore {
                 &format!("SELECT {CONTEXT_COLUMNS} FROM context_nodes WHERE id=?1"),
                 [id],
                 map_context,
-            ).optional()
+            )
+            .optional()
         })
     }
 
-    fn search_context_nodes(&self, namespace: &str, workspace_id: &str, query: &str, limit: usize) -> Result<Vec<ContextNode>> {
-        if limit == 0 { return Ok(Vec::new()); }
+    fn search_context_nodes(
+        &self,
+        namespace: &str,
+        workspace_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ContextNode>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let q = fts_query(query);
         self.with_conn(|conn| {
             if q.is_empty() {
@@ -89,8 +106,8 @@ impl SemanticMemoryStore for SqliteMemoryStore {
     }
 
     fn mark_context_dirty(&self, id: &str, child_delta: u64) -> Result<Option<ContextNode>> {
-        let delta=i64::try_from(child_delta).unwrap_or(i64::MAX);
-        let conn=self.writer_conn()?;
+        let delta = i64::try_from(child_delta).unwrap_or(i64::MAX);
+        let conn = self.writer_conn()?;
         conn.execute(
             "UPDATE context_nodes SET dirty_children=MIN(9223372036854775807,dirty_children+?1),updated_at=?2 WHERE id=?3",
             params![delta,now_epoch(),id],
@@ -109,7 +126,7 @@ impl SemanticMemoryStore for SqliteMemoryStore {
     }
 
     fn record_source(&self, source: NewMemorySource) -> Result<MemorySource> {
-        let source=source.into_record()?;
+        let source = source.into_record()?;
         let conn=self.writer_conn()?;
         conn.execute(
             "INSERT INTO memory_sources(id,memory_id,source_kind,source_id,source_uri,source_digest,relationship,source_revision,observed_at,valid_from,valid_until)
@@ -143,8 +160,10 @@ impl SemanticMemoryStore for SqliteMemoryStore {
     }
 
     fn record_change_set(&self, set: &MemoryChangeSet, changes: &[MemoryChange]) -> Result<()> {
-        let mut conn=self.writer_conn()?;
-        let tx=conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage)?;
+        let mut conn = self.writer_conn()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
         tx.execute(
             "INSERT OR REPLACE INTO memory_change_sets(id,workspace_id,origin_type,origin_id,started_at,committed_at,model,reason,status)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
@@ -203,7 +222,12 @@ impl SemanticMemoryStore for SqliteMemoryStore {
     }
 
     fn register_schema(&self, schema: &MemorySchemaDefinition) -> Result<()> {
-        for raw in [&schema.fields_schema_json,&schema.retention_policy_json,&schema.merge_policy_json,&schema.index_fields_json] {
+        for raw in [
+            &schema.fields_schema_json,
+            &schema.retention_policy_json,
+            &schema.merge_policy_json,
+            &schema.index_fields_json,
+        ] {
             serde_json::from_str::<serde_json::Value>(raw)
                 .map_err(|e| MemoryError::Invalid(format!("memory schema JSON is invalid: {e}")))?;
         }

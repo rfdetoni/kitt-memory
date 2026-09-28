@@ -51,8 +51,13 @@ pub struct NewContextNode {
 impl NewContextNode {
     pub fn into_record(self) -> Result<ContextNode> {
         let path = self.path.trim().trim_matches('/').to_string();
-        if self.namespace.trim().is_empty() || self.workspace_id.trim().is_empty() || path.is_empty() {
-            return Err(MemoryError::Invalid("context node identity is incomplete".into()));
+        if self.namespace.trim().is_empty()
+            || self.workspace_id.trim().is_empty()
+            || path.is_empty()
+        {
+            return Err(MemoryError::Invalid(
+                "context node identity is incomplete".into(),
+            ));
         }
         let now = now_epoch();
         Ok(ContextNode {
@@ -111,7 +116,9 @@ impl NewMemorySource {
             || self.source_id.trim().is_empty()
             || self.relationship.trim().is_empty()
         {
-            return Err(MemoryError::Invalid("memory source identity is incomplete".into()));
+            return Err(MemoryError::Invalid(
+                "memory source identity is incomplete".into(),
+            ));
         }
         Ok(MemorySource {
             id: format!("src_{}", Uuid::new_v4().simple()),

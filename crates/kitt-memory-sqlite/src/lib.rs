@@ -1,10 +1,10 @@
 use kitt_memory_core::{
-    BaselineQuery, CorrectionRecord, KnowledgeEdge, KnowledgeRelation, KnowledgeStore,
-    MemoryBaseline, MemoryError, MemoryKind, MemoryRecord, MemoryScope, MemoryStatus, MemoryStore,
-    MergeCandidate, MergeDisposition, NewConcept, NewCorrection, NewMemory, RecallQuery, Result,
-    SemanticReranker, Sensitivity, StoredConcept, assess_merge_candidate, build_memory_baseline,
-    now_epoch, ContextNode, MemoryChange, MemoryChangeSet, MemorySchemaDefinition, MemorySource,
-    NewContextNode, NewMemorySource, RecallTrace, SemanticMemoryStore,
+    BaselineQuery, ContextNode, CorrectionRecord, KnowledgeEdge, KnowledgeRelation, KnowledgeStore,
+    MemoryBaseline, MemoryChange, MemoryChangeSet, MemoryError, MemoryKind, MemoryRecord,
+    MemorySchemaDefinition, MemoryScope, MemorySource, MemoryStatus, MemoryStore, MergeCandidate,
+    MergeDisposition, NewConcept, NewContextNode, NewCorrection, NewMemory, NewMemorySource,
+    RecallQuery, RecallTrace, Result, SemanticMemoryStore, SemanticReranker, Sensitivity,
+    StoredConcept, assess_merge_candidate, build_memory_baseline, now_epoch,
 };
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, TransactionBehavior, params, types::Type,
