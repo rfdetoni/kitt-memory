@@ -180,6 +180,7 @@ pub enum MemoryStatus {
     Active,
     Superseded,
     Archived,
+    Candidate,
 }
 
 impl MemoryStatus {
@@ -188,6 +189,7 @@ impl MemoryStatus {
             Self::Active => "ACTIVE",
             Self::Superseded => "SUPERSEDED",
             Self::Archived => "ARCHIVED",
+            Self::Candidate => "CANDIDATE",
         }
     }
 
@@ -196,6 +198,7 @@ impl MemoryStatus {
             "ACTIVE" => Ok(Self::Active),
             "SUPERSEDED" => Ok(Self::Superseded),
             "ARCHIVED" => Ok(Self::Archived),
+            "CANDIDATE" => Ok(Self::Candidate),
             other => Err(MemoryError::Corrupt(format!(
                 "unknown memory status: {other}"
             ))),

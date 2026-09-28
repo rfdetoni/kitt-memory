@@ -57,3 +57,8 @@ Schema v4 adds explicit conversation `scope_key`, point-in-time `as_of` retrieva
 Version 0.3 adds schema-v5 context nodes, provenance, ChangeSets, recall traces and schema registrations as additive shared-data-plane capabilities. Existing Agent-owned durable records remain authoritative for Agent-originated project state. Context nodes are navigation projections, not a new competing authority, and shared-memory availability still must not determine whether Agent-local memories are visible.
 
 Consumers that understand 0.3 can progressively retrieve context-node summaries before normal recall, attach provenance to mirrored memories and persist consolidation audit records. Older consumers can continue using the v0.2 MemoryStore APIs against the same database.
+
+
+## 0.4 single memory authority
+
+Agent consumers should no longer maintain a second durable `memories` table. `kitt-memoryd` owns durable records, status, provenance, dream commits and maintenance. Clients may cache ephemeral rankings or context, but those caches must not become an alternate source of truth.

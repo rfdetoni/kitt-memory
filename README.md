@@ -260,3 +260,12 @@ Context nodes accumulate `dirty_children` and expose a deterministic dirty ratio
 
 The schema registry lets a product or plugin define specialized memory shapes, retention and merge policies while retaining a built-in base kind and default sensitivity. Registration is data-driven and versioned.
 
+
+
+## 0.4 standalone memory service
+
+`kitt-memoryd` is now the canonical runtime owner of durable KITT memory. It listens on loopback only (default `127.0.0.1:41829`), stores its token under the KITT memory config directory, and stores SQLite state under the KITT memory data directory.
+
+The hot path exposes protocol-v1 `memory.remember`, `memory.recall` and `memory.forget`. The bounded `memory.manage` control plane owns status changes, pin/archive/touch operations, dream-run history, atomic dream commits and maintenance. Agent-side code may propose dream operations, but only kitt-memory persists memory state and provenance.
+
+Environment overrides: `KITT_MEMORY_ADDR`, `KITT_MEMORY_CONFIG_DIR`, `KITT_MEMORY_DATA_DIR`, `KITT_MEMORY_TOKEN_PATH`, `KITT_MEMORY_DB`.

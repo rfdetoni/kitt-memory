@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0 - 2026-09-28
+
+- Make kitt-memory the standalone durable authority for Agent memory.
+- Add `kitt-memoryd`, a loopback-only authenticated service for remember/recall/forget and bounded management operations.
+- Add schema v6 dream-run persistence and atomic dream commit support.
+- Add CANDIDATE memory status used by Dreaming Mode.
+- Add bounded administrative reads, status/pin/archive/touch operations and maintenance.
+- Keep provenance in `memory_sources` and consolidate/prune in the memory service instead of Agent-local tables.
+
+
 ## 0.3.0 - 2026-09-28
 
 - Add hierarchical context nodes with bounded freshness counters and FTS-backed branch discovery.

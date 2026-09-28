@@ -219,3 +219,26 @@ pub trait SemanticMemoryStore: Send + Sync {
     fn register_schema(&self, schema: &MemorySchemaDefinition) -> Result<()>;
     fn list_schemas(&self) -> Result<Vec<MemorySchemaDefinition>>;
 }
+
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DreamRunRecord {
+    pub id: String,
+    pub workspace_id: String,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
+    pub status: String,
+    pub sessions_scanned: u64,
+    pub entries_scanned: u64,
+    pub signals_found: u64,
+    pub memories_added: u64,
+    pub memories_merged: u64,
+    pub memories_superseded: u64,
+    pub memories_archived: u64,
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub failure_reason: Option<String>,
+    pub dry_run: bool,
+}
