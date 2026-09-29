@@ -32,9 +32,8 @@ K.I.T.T. Memory is the shared persistent memory data plane used across the ecosy
 - Versioned product/plugin memory schemas without expanding the built-in memory-kind enum.
 - Namespace, global/workspace and conversation scoping with explicit `scope_key` isolation.
 - Sensitivity levels: `public`, `personal`, `private`, `secret`, `ephemeral`.
-- Monotonic sensitivity enforcement on upsert, import and deduplication.
+- Monotonic sensitivity enforcement on upsert and deduplication.
 - TTL/expiry pruning.
-- Migration utility for legacy K.I.T.T. Agent databases.
 
 ---
 
@@ -55,7 +54,7 @@ crates/
 └── kitt-memory-sqlite/   SQLite WAL implementation, indexes and queries
 
 apps/
-└── kitt-memory-migrate/  idempotent legacy migration utility
+└── kitt-memoryd/         authenticated loopback memory authority
 ```
 
 The domain core remains independent of GUI, HTTP and model-provider concerns. Storage-specific behavior is isolated behind store abstractions, while semantic ranking is injected through a small scoring port so the shared engine never requires a resident model service.
@@ -72,7 +71,7 @@ The key privacy invariant is monotonic sensitivity:
 result = most_restrictive(existing.sensitivity, incoming.sensitivity)
 ```
 
-A duplicate merge, migration or later update therefore cannot silently downgrade a memory from `secret` to `private` or from `private` to `public`.
+A duplicate merge or later update therefore cannot silently downgrade a memory from `secret` to `private` or from `private` to `public`.
 
 ---
 
@@ -130,17 +129,9 @@ let baseline = store.baseline(&kitt_memory_core::BaselineQuery {
 
 ---
 
-## Migration
+## Runtime service
 
-Import a legacy Agent database without mutating the source:
-
-```bash
-cargo run -p kitt-memory-migrate -- \
-  /path/to/legacy_agent_history.db \
-  ~/.config/kitt/assistant/memory.db
-```
-
-Migration is intended to be idempotent and uses the same deduplication and sensitivity invariants as normal writes.
+`kitt-memoryd` is the only durable memory authority used by the current K.I.T.T. ecosystem. The management plane includes status/pin/archive/touch, Dreaming transactions, corrections, concepts and typed concept links. Historical Agent-local memory import is intentionally not supported by 0.5.x.
 
 ---
 
@@ -184,7 +175,7 @@ cargo test --all
 
 ## Contributing
 
-Memory changes should preserve deterministic ranking behavior, migration idempotency and the monotonic sensitivity invariant. Avoid features that require a heavyweight resident service when the same behavior can remain local and bounded.
+Memory changes should preserve deterministic ranking behavior, the monotonic sensitivity invariant. Avoid features that require a heavyweight resident service when the same behavior can remain local and bounded.
 
 ---
 
@@ -262,10 +253,10 @@ The schema registry lets a product or plugin define specialized memory shapes, r
 
 
 
-## 0.4 standalone memory service
+## 0.5 standalone memory service
 
 `kitt-memoryd` is now the canonical runtime owner of durable KITT memory. It listens on loopback only (default `127.0.0.1:41829`), stores its token under the KITT memory config directory, and stores SQLite state under the KITT memory data directory.
 
-The hot path exposes protocol-v1 `memory.remember`, `memory.recall` and `memory.forget`. The bounded `memory.manage` control plane owns status changes, pin/archive/touch operations, dream-run history, atomic dream commits and maintenance. Agent-side code may propose dream operations, but only kitt-memory persists memory state and provenance.
+The hot path exposes protocol-v1 `memory.remember`, `memory.recall` and `memory.forget`. The bounded `memory.manage` control plane owns status changes, pin/archive/touch operations, dream-run history, atomic dream commits, corrections, concepts, typed concept links and maintenance. Agent-side code may propose dream operations, but only kitt-memory persists memory state and provenance.
 
 Environment overrides: `KITT_MEMORY_ADDR`, `KITT_MEMORY_CONFIG_DIR`, `KITT_MEMORY_DATA_DIR`, `KITT_MEMORY_TOKEN_PATH`, `KITT_MEMORY_DB`.
