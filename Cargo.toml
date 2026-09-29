@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/kitt-memory-core", "crates/kitt-memory-sqlite", "apps/kitt-memory-migrate", "apps/kitt-memoryd"]
+members = ["crates/kitt-memory-core", "crates/kitt-memory-sqlite", "apps/kitt-memoryd"]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
