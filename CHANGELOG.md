@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0 - 2026-09-28
+
+- Remove the legacy Agent-memory import binary and SQLite import path.
+- Extend `kitt-memoryd` management with durable correction, concept and typed concept-link operations.
+- Make the single-memory-authority contract explicit: reusable knowledge is written only to kitt-memory.
+- Drop historical compatibility documentation in favor of the current ecosystem contract.
+
 ## 0.4.0 - 2026-09-28
 
 - Make kitt-memory the standalone durable authority for Agent memory.
