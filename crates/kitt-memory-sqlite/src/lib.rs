@@ -834,18 +834,6 @@ fn merged_strings(left: Vec<String>, right: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-fn close_validity(existing: Option<i64>, at: i64) -> Option<i64> {
-    Some(existing.map_or(at, |until| until.min(at)))
-}
-fn identity_key(memory: &MemoryRecord) -> (String, String, String, String, String) {
-    (
-        memory.workspace_id.clone(),
-        memory.scope.as_db().to_string(),
-        memory.scope_key.clone().unwrap_or_default(),
-        memory.kind.as_db().to_string(),
-        memory.content_hash.clone(),
-    )
-}
 fn find_identity_id(conn: &Connection, memory: &MemoryRecord) -> Result<Option<String>> {
     conn.query_row("SELECT id FROM memories WHERE namespace=?1 AND workspace_id=?2 AND scope=?3 AND COALESCE(scope_key,'')=COALESCE(?4,'') AND kind=?5 AND content_hash=?6 AND status='ACTIVE' LIMIT 1",params![memory.namespace,memory.workspace_id,memory.scope.as_db(),memory.scope_key,memory.kind.as_db(),memory.content_hash],|row|row.get(0)).optional().map_err(storage)
 }
