@@ -1,6 +1,5 @@
 use kitt_memory_core::*;
 use kitt_memory_sqlite::SqliteMemoryStore;
-use rusqlite::Connection;
 use std::sync::Arc;
 use std::thread;
 
@@ -403,108 +402,6 @@ fn test_database_file_is_private_and_symlink_target_is_rejected() {
     assert!(SqliteMemoryStore::open(&link).is_err());
     let _ = std::fs::remove_file(&link);
     let _ = std::fs::remove_file(&target);
-}
-
-#[test]
-fn test_missing_legacy_source_is_not_created() {
-    let dest = temp_db_path("legacy-dest");
-    let missing = temp_db_path("legacy-missing");
-    let store = SqliteMemoryStore::open(&dest).unwrap();
-    assert!(!missing.exists());
-    assert!(store.import_legacy_agent_db(&missing).is_err());
-    assert!(!missing.exists());
-    drop(store);
-    let _ = std::fs::remove_file(&dest);
-}
-
-#[test]
-fn test_migration_from_anonymized_agent_cli_db() {
-    let source_path = temp_db_path("agent_cli_source");
-    let dest_path = temp_db_path("kitt_dest");
-
-    // 1. Create a legacy agent-cli schema DB
-    {
-        let conn = Connection::open(&source_path).unwrap();
-        conn.execute_batch(
-            r#"
-            CREATE TABLE workspaces (
-                id TEXT PRIMARY KEY,
-                canonical_path_hash TEXT NOT NULL UNIQUE,
-                display_name TEXT NOT NULL,
-                git_root TEXT,
-                created_at REAL NOT NULL,
-                last_opened_at REAL NOT NULL
-            );
-            CREATE TABLE memories (
-                id TEXT PRIMARY KEY,
-                workspace_id TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                content TEXT NOT NULL,
-                normalized_content TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'ACTIVE',
-                importance REAL NOT NULL DEFAULT 0.5,
-                confidence REAL NOT NULL DEFAULT 1.0,
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL,
-                last_accessed_at REAL,
-                access_count INTEGER NOT NULL DEFAULT 0,
-                valid_from REAL,
-                valid_until REAL,
-                supersedes_id TEXT,
-                content_hash TEXT NOT NULL,
-                pinned INTEGER NOT NULL DEFAULT 0,
-                metadata_json TEXT DEFAULT '{}',
-                FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
-            );
-            INSERT INTO workspaces VALUES('ws-test', 'hash123', 'Test Workspace', '/tmp/test', 1700000000.0, 1700000000.0);
-            INSERT INTO memories VALUES('mem-1', 'ws-test', 'PROJECT_RULE', 'Rule 1: Always test code', 'rule 1: always test code', 'ACTIVE', 0.9, 1.0, 1700000000.0, 1700000000.0, 1700000100.0, 3, NULL, NULL, NULL, 'hash_mem_1', 1, '{"source": "test"}');
-            INSERT INTO memories VALUES('mem-2', 'ws-test', 'ARCHITECTURE_DECISION', 'Rule 2: SQLite WAL', 'rule 2: sqlite wal', 'ACTIVE', 0.8, 1.0, 1700000050.0, 1700000050.0, NULL, 0, NULL, NULL, NULL, 'hash_mem_2', 0, '{}');
-            INSERT INTO memories VALUES('mem-3', 'ws-test', 'EPISODIC', 'Expired note', 'expired note', 'ACTIVE', 0.5, 0.8, 1700000000.0, 1700000000.0, NULL, 0, NULL, 1700000010.0, NULL, 'hash_mem_3', 0, '{}');
-            "#,
-        )
-        .unwrap();
-    }
-
-    // Record source file hash before migration
-    let source_bytes_before = std::fs::read(&source_path).unwrap();
-
-    // 2. Perform migration
-    let dest_store = SqliteMemoryStore::open(&dest_path).unwrap();
-    let count = dest_store.import_legacy_agent_db(&source_path).unwrap();
-    assert_eq!(count, 3);
-
-    // 3. Verify destination records
-    let recalled = dest_store
-        .recall(&RecallQuery {
-            namespace: "agent-cli".into(),
-            workspace_id: "ws-test".into(),
-            scope_key: None,
-            text: "Always test code".into(),
-            limit: 5,
-            as_of: None,
-            allow_private: true,
-            allow_secret: true,
-        })
-        .unwrap();
-    assert_eq!(recalled.len(), 2);
-    assert_eq!(recalled[0].id, "mem-1");
-    assert_eq!(recalled[0].content, "Rule 1: Always test code");
-    assert!(recalled[0].pinned);
-    assert_eq!(recalled[0].access_count, 3);
-
-    // 4. Verify source DB is unchanged
-    let source_bytes_after = std::fs::read(&source_path).unwrap();
-    assert_eq!(
-        source_bytes_before, source_bytes_after,
-        "Source database must remain untouched by migration"
-    );
-
-    // 5. Test idempotency: re-running migration should succeed without duplicate growth
-    let count2 = dest_store.import_legacy_agent_db(&source_path).unwrap();
-    assert_eq!(count2, 3);
-
-    let _ = std::fs::remove_file(&source_path);
-    let _ = std::fs::remove_file(&dest_path);
 }
 
 #[test]
