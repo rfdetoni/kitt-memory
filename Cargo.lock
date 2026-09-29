@@ -156,7 +156,7 @@ dependencies = [
 
 [[package]]
 name = "kitt-memory-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "hex",
  "serde",
@@ -167,16 +167,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "kitt-memory-migrate"
-version = "0.4.0"
-dependencies = [
- "kitt-memory-core",
- "kitt-memory-sqlite",
-]
-
-[[package]]
 name = "kitt-memory-sqlite"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "kitt-memory-core",
  "rusqlite",
@@ -186,7 +178,7 @@ dependencies = [
 
 [[package]]
 name = "kitt-memoryd"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "kitt-memory-core",
  "kitt-memory-sqlite",
