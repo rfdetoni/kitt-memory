@@ -240,56 +240,102 @@ fn manage(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
             Ok(json!({"records": records}))
         }
         "correction.record" => {
-            let namespace = args.get("namespace").and_then(Value::as_str).unwrap_or("agent-cli");
+            let namespace = args
+                .get("namespace")
+                .and_then(Value::as_str)
+                .unwrap_or("agent-cli");
             let workspace_id = as_str(&args, "workspace_id")?;
             let sensitivity = args
-                .get("sensitivity").and_then(Value::as_str)
-                .map(parse_sensitivity).transpose()?.unwrap_or(Sensitivity::Private);
+                .get("sensitivity")
+                .and_then(Value::as_str)
+                .map(parse_sensitivity)
+                .transpose()?
+                .unwrap_or(Sensitivity::Private);
             let source_memory_ids = args
-                .get("source_memory_ids").and_then(Value::as_array).cloned().unwrap_or_default()
-                .into_iter().filter_map(|value| value.as_str().map(str::to_string)).collect();
-            let correction = store.record_correction(NewCorrection {
-                namespace: namespace.to_string(),
-                workspace_id: workspace_id.to_string(),
-                context: as_str(&args, "context")?.to_string(),
-                predicted: as_str(&args, "predicted")?.to_string(),
-                corrected: as_str(&args, "corrected")?.to_string(),
-                reason: args.get("reason").and_then(Value::as_str).map(str::to_string),
-                source: args.get("source").and_then(Value::as_str).unwrap_or("agent").to_string(),
-                sensitivity,
-                source_memory_ids,
-            }).map_err(|e| e.to_string())?;
+                .get("source_memory_ids")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect();
+            let correction = store
+                .record_correction(NewCorrection {
+                    namespace: namespace.to_string(),
+                    workspace_id: workspace_id.to_string(),
+                    context: as_str(&args, "context")?.to_string(),
+                    predicted: as_str(&args, "predicted")?.to_string(),
+                    corrected: as_str(&args, "corrected")?.to_string(),
+                    reason: args
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    source: args
+                        .get("source")
+                        .and_then(Value::as_str)
+                        .unwrap_or("agent")
+                        .to_string(),
+                    sensitivity,
+                    source_memory_ids,
+                })
+                .map_err(|e| e.to_string())?;
             Ok(json!({"correction": correction}))
         }
         "concept.upsert" => {
-            let namespace = args.get("namespace").and_then(Value::as_str).unwrap_or("agent-cli");
+            let namespace = args
+                .get("namespace")
+                .and_then(Value::as_str)
+                .unwrap_or("agent-cli");
             let workspace_id = as_str(&args, "workspace_id")?;
             let sensitivity = args
-                .get("sensitivity").and_then(Value::as_str)
-                .map(parse_sensitivity).transpose()?.unwrap_or(Sensitivity::Private);
+                .get("sensitivity")
+                .and_then(Value::as_str)
+                .map(parse_sensitivity)
+                .transpose()?
+                .unwrap_or(Sensitivity::Private);
             let labels = args
-                .get("labels").and_then(Value::as_array).cloned().unwrap_or_default()
-                .into_iter().filter_map(|value| value.as_str().map(str::to_string)).collect();
+                .get("labels")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect();
             let source_memory_ids = args
-                .get("source_memory_ids").and_then(Value::as_array).cloned().unwrap_or_default()
-                .into_iter().filter_map(|value| value.as_str().map(str::to_string)).collect();
-            let concept = store.upsert_concept(NewConcept {
-                namespace: namespace.to_string(),
-                workspace_id: workspace_id.to_string(),
-                name: as_str(&args, "name")?.to_string(),
-                definition: as_str(&args, "definition")?.to_string(),
-                confidence: args.get("confidence").and_then(Value::as_f64).unwrap_or(0.7) as f32,
-                sensitivity,
-                labels,
-                source_memory_ids,
-            }).map_err(|e| e.to_string())?;
+                .get("source_memory_ids")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect();
+            let concept = store
+                .upsert_concept(NewConcept {
+                    namespace: namespace.to_string(),
+                    workspace_id: workspace_id.to_string(),
+                    name: as_str(&args, "name")?.to_string(),
+                    definition: as_str(&args, "definition")?.to_string(),
+                    confidence: args
+                        .get("confidence")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(0.7) as f32,
+                    sensitivity,
+                    labels,
+                    source_memory_ids,
+                })
+                .map_err(|e| e.to_string())?;
             Ok(json!({"concept": concept}))
         }
         "concept.link" => {
-            let namespace = args.get("namespace").and_then(Value::as_str).unwrap_or("agent-cli");
+            let namespace = args
+                .get("namespace")
+                .and_then(Value::as_str)
+                .unwrap_or("agent-cli");
             let workspace_id = as_str(&args, "workspace_id")?;
             let normalized = as_str(&args, "relation")?
-                .trim().replace('-', "_").to_ascii_uppercase();
+                .trim()
+                .replace('-', "_")
+                .to_ascii_uppercase();
             let relation_name = match normalized.as_str() {
                 "RELATED_TO" => "RELATED",
                 "DEPENDS_ON" => "REQUIRES",
@@ -298,14 +344,16 @@ fn manage(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
                 other => other,
             };
             let relation = KnowledgeRelation::from_db(relation_name).map_err(|e| e.to_string())?;
-            let edge = store.link_concepts(
-                namespace,
-                workspace_id,
-                as_str(&args, "source_id")?,
-                as_str(&args, "target_id")?,
-                relation,
-                args.get("weight").and_then(Value::as_f64).unwrap_or(1.0) as f32,
-            ).map_err(|e| e.to_string())?;
+            let edge = store
+                .link_concepts(
+                    namespace,
+                    workspace_id,
+                    as_str(&args, "source_id")?,
+                    as_str(&args, "target_id")?,
+                    relation,
+                    args.get("weight").and_then(Value::as_f64).unwrap_or(1.0) as f32,
+                )
+                .map_err(|e| e.to_string())?;
             Ok(json!({"edge": edge}))
         }
         "dream.last" => {
