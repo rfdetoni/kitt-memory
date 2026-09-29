@@ -6,9 +6,7 @@ use kitt_memory_core::{
     RecallQuery, RecallTrace, Result, SemanticMemoryStore, SemanticReranker, Sensitivity,
     StoredConcept, assess_merge_candidate, build_memory_baseline, now_epoch,
 };
-use rusqlite::{
-    Connection, OpenFlags, OptionalExtension, TransactionBehavior, params, types::Type,
-};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, types::Type};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fs::{self, OpenOptions},
@@ -56,17 +54,6 @@ fn ensure_private_database_file(path: &Path) -> Result<()> {
         Err(error) => return Err(storage(error)),
     }
     Ok(())
-}
-
-fn open_legacy_read_only(path: &Path) -> Result<Connection> {
-    let metadata = fs::symlink_metadata(path).map_err(storage)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(MemoryError::Storage(format!(
-            "legacy memory source must be a regular non-symlink file: {}",
-            path.display()
-        )));
-    }
-    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(storage)
 }
 
 pub struct SqliteMemoryStore {
@@ -120,107 +107,6 @@ impl SqliteMemoryStore {
     ) -> Result<T> {
         let conn = self.conn()?;
         f(&conn).map_err(storage)
-    }
-
-    pub fn import_legacy_agent_db(&self, source: impl AsRef<Path>) -> Result<usize> {
-        let source = open_legacy_read_only(source.as_ref())?;
-        let has_valid_from = {
-            let mut columns = source
-                .prepare("PRAGMA table_info(memories)")
-                .map_err(storage)?;
-            let names = columns
-                .query_map([], |row| row.get::<_, String>(1))
-                .map_err(storage)?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(storage)?;
-            names.iter().any(|name| name == "valid_from")
-        };
-        let import_sql = if has_valid_from {
-            "SELECT id, workspace_id, kind, content, normalized_content, status, importance,              confidence, created_at, updated_at, last_accessed_at, access_count, valid_from, valid_until,              supersedes_id, content_hash, pinned, COALESCE(metadata_json,'{}') FROM memories"
-        } else {
-            "SELECT id, workspace_id, kind, content, normalized_content, status, importance,              confidence, created_at, updated_at, last_accessed_at, access_count, created_at AS valid_from, valid_until,              supersedes_id, content_hash, pinned, COALESCE(metadata_json,'{}') FROM memories"
-        };
-        let mut stmt = source.prepare(import_sql).map_err(storage)?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok(MemoryRecord {
-                    id: row.get(0)?,
-                    namespace: "agent-cli".into(),
-                    workspace_id: row.get(1)?,
-                    kind: parse_kind_at(row.get::<_, String>(2)?, 2)?,
-                    content: row.get(3)?,
-                    normalized_content: row.get(4)?,
-                    status: parse_status_at(row.get::<_, String>(5)?, 5)?,
-                    sensitivity: Sensitivity::Private,
-                    scope: MemoryScope::Workspace,
-                    scope_key: None,
-                    importance: row.get::<_, f64>(6)? as f32,
-                    confidence: row.get::<_, f64>(7)? as f32,
-                    created_at: row.get::<_, f64>(8)? as i64,
-                    updated_at: row.get::<_, f64>(9)? as i64,
-                    last_accessed_at: row.get::<_, Option<f64>>(10)?.map(|value| value as i64),
-                    access_count: row.get::<_, i64>(11)? as u64,
-                    valid_from: row.get::<_, Option<f64>>(12)?.map(|value| value as i64),
-                    valid_until: row.get::<_, Option<f64>>(13)?.map(|value| value as i64),
-                    supersedes_id: row.get(14)?,
-                    content_hash: row.get(15)?,
-                    pinned: row.get::<_, i64>(16)? != 0,
-                    metadata_json: row.get(17)?,
-                })
-            })
-            .map_err(storage)?;
-
-        let source_check: String = source
-            .query_row("PRAGMA quick_check", [], |row| row.get(0))
-            .map_err(storage)?;
-        if source_check != "ok" {
-            return Err(MemoryError::Corrupt(format!(
-                "legacy source quick_check failed: {source_check}"
-            )));
-        }
-        let mut imported = Vec::new();
-        let mut active_seen: HashMap<(String, String, String, String, String), String> =
-            HashMap::new();
-        for row in rows {
-            let mut memory = row.map_err(storage)?.canonicalized_for_storage()?;
-            if memory.status == MemoryStatus::Active {
-                let key = identity_key(&memory);
-                if let Some(keeper) = active_seen.get(&key) {
-                    memory.status = MemoryStatus::Superseded;
-                    memory.supersedes_id = Some(keeper.clone());
-                    memory.valid_until = close_validity(memory.valid_until, now_epoch());
-                } else {
-                    active_seen.insert(key, memory.id.clone());
-                }
-            }
-            imported.push(memory);
-        }
-        let count = imported.len();
-        let mut conn = self.writer_conn()?;
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(storage)?;
-        for mut memory in imported {
-            if memory.status == MemoryStatus::Active
-                && let Some(existing_id) = find_identity_id(&tx, &memory)?
-                && existing_id != memory.id
-            {
-                memory.status = MemoryStatus::Superseded;
-                memory.supersedes_id = Some(existing_id);
-                memory.valid_until = close_validity(memory.valid_until, now_epoch());
-            }
-            upsert_record_tx(&tx, &memory)?;
-        }
-        tx.commit().map_err(storage)?;
-        let destination_check = self.with_conn(|conn| {
-            conn.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
-        })?;
-        if destination_check != "ok" {
-            return Err(MemoryError::Corrupt(format!(
-                "destination quick_check failed: {destination_check}"
-            )));
-        }
-        Ok(count)
     }
 
     fn load_recall_candidates(
