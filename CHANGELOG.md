@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.1 - 2026-09-30
+
+- Add the public lifecycle evidence ingress for `session.started`, `turn.started`, `tool.completed`, `turn.completed` and `session.ended`.
+- Route lifecycle observations through the existing idempotent `MemoryJob` pipeline instead of creating a second store or bypassing evidence tiering.
+- Reject memory/recall-derived lifecycle sources and persist only anonymized source identity/revision plus a caller-provided SHA-256 evidence digest.
+- Preserve `kitt-memoryd` as the single durable semantic-memory authority.
+
 ## 0.6.0 - 2026-09-30
 
 - Return a durable `recall_trace_id` with runtime recall so consuming agents can correlate exactly which memories were selected.
