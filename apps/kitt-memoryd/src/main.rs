@@ -1,7 +1,8 @@
 use kitt_memory_core::{
     DreamRunRecord, KnowledgeRelation, KnowledgeStore, MemoryConsumptionReceipt, MemoryJob,
     MemoryKind, MemoryRecord, MemoryScope, MemorySource, MemoryStatus, MemoryStore, NewConcept,
-    NewCorrection, NewMemory, RecallQuery, RecallTrace, SemanticMemoryStore, Sensitivity, now_epoch,
+    NewCorrection, NewMemory, RecallQuery, RecallTrace, SemanticMemoryStore, Sensitivity,
+    now_epoch,
 };
 use kitt_memory_sqlite::SqliteMemoryStore;
 use serde::{Deserialize, Serialize};
@@ -395,10 +396,9 @@ fn manage(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
             Ok(json!({"committed": true}))
         }
         "receipt.record" => {
-            let receipt: MemoryConsumptionReceipt = serde_json::from_value(
-                args.get("receipt").cloned().ok_or("missing receipt")?,
-            )
-            .map_err(|e| e.to_string())?;
+            let receipt: MemoryConsumptionReceipt =
+                serde_json::from_value(args.get("receipt").cloned().ok_or("missing receipt")?)
+                    .map_err(|e| e.to_string())?;
             store
                 .record_consumption_receipt(&receipt)
                 .map_err(|e| e.to_string())?;
@@ -427,31 +427,35 @@ fn manage(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
             Ok(json!({"job": job}))
         }
         "job.claim" => {
-            let job = store.claim_memory_job(
-                as_str(&args, "phase")?,
-                as_str(&args, "owner")?,
-                args.get("lease_seconds")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(120),
-            )
-            .map_err(|e| e.to_string())?;
+            let job = store
+                .claim_memory_job(
+                    as_str(&args, "phase")?,
+                    as_str(&args, "owner")?,
+                    args.get("lease_seconds")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(120),
+                )
+                .map_err(|e| e.to_string())?;
             Ok(json!({"job": job}))
         }
         "job.complete" => {
-            let changed = store.complete_memory_job(
-                as_str(&args, "id")?,
-                as_str(&args, "owner")?,
-                args.get("output_digest").and_then(Value::as_str),
-            ).map_err(|e| e.to_string())?;
+            let changed = store
+                .complete_memory_job(
+                    as_str(&args, "id")?,
+                    as_str(&args, "owner")?,
+                    args.get("output_digest").and_then(Value::as_str),
+                )
+                .map_err(|e| e.to_string())?;
             Ok(json!({"changed": changed}))
         }
         "job.fail" => {
-            let changed = store.fail_memory_job(
-                as_str(&args, "id")?,
-                as_str(&args, "owner")?,
-                args.get("retry_after_seconds").and_then(Value::as_i64),
-            )
-            .map_err(|e| e.to_string())?;
+            let changed = store
+                .fail_memory_job(
+                    as_str(&args, "id")?,
+                    as_str(&args, "owner")?,
+                    args.get("retry_after_seconds").and_then(Value::as_i64),
+                )
+                .map_err(|e| e.to_string())?;
             Ok(json!({"changed": changed}))
         }
         "maintenance" => {
@@ -548,11 +552,21 @@ fn handle(store: &SqliteMemoryStore, frame: Frame, token: &str) -> ResponseEnvel
                     .get("scope_key")
                     .and_then(Value::as_str)
                     .map(str::to_string),
-                text: p.get("query").and_then(Value::as_str).unwrap_or("").to_string(),
+                text: p
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
                 limit: p.get("limit").and_then(Value::as_u64).unwrap_or(8) as usize,
                 as_of: p.get("as_of").and_then(Value::as_i64),
-                allow_private: p.get("allow_private").and_then(Value::as_bool).unwrap_or(false),
-                allow_secret: p.get("allow_secret").and_then(Value::as_bool).unwrap_or(false),
+                allow_private: p
+                    .get("allow_private")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                allow_secret: p
+                    .get("allow_secret")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             };
             if query.workspace_id.trim().is_empty() {
                 error(Some(id), "memory_error", "missing workspace_id")
