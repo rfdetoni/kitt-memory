@@ -1,15 +1,10 @@
-use kitt_memory_core::{
-    MemoryConsumptionReceipt, MemoryError, MemoryJob, Result, now_epoch,
-};
+use kitt_memory_core::{MemoryConsumptionReceipt, MemoryError, MemoryJob, Result, now_epoch};
 use rusqlite::{OptionalExtension, params};
 
 use crate::{SqliteMemoryStore, storage};
 
 impl SqliteMemoryStore {
-    pub fn record_consumption_receipt(
-        &self,
-        receipt: &MemoryConsumptionReceipt,
-    ) -> Result<()> {
+    pub fn record_consumption_receipt(&self, receipt: &MemoryConsumptionReceipt) -> Result<()> {
         receipt.validate()?;
         let conn = self.writer_conn()?;
         conn.execute(
@@ -54,7 +49,7 @@ impl SqliteMemoryStore {
                  FROM memory_consumption_receipts r
                  JOIN recall_traces t ON t.id=r.recall_trace_id
                  WHERE t.workspace_id=?1
-                 ORDER BY r.consumed_at DESC,r.rowid DESC LIMIT ?2"
+                 ORDER BY r.consumed_at DESC,r.rowid DESC LIMIT ?2",
             )?;
             stmt.query_map(params![workspace_id, limit.min(1024) as i64], |row| {
                 Ok(MemoryConsumptionReceipt {
@@ -102,7 +97,12 @@ impl SqliteMemoryStore {
                     output_digest,created_at,updated_at
              FROM memory_jobs
              WHERE phase=?1 AND source_id=?2 AND source_revision=?3 AND input_digest=?4",
-            params![job.phase, job.source_id, job.source_revision, job.input_digest],
+            params![
+                job.phase,
+                job.source_id,
+                job.source_revision,
+                job.input_digest
+            ],
             map_job,
         )
         .map_err(storage)
@@ -117,7 +117,9 @@ impl SqliteMemoryStore {
         let owner = owner.trim();
         let phase = phase.trim();
         if owner.is_empty() || phase.is_empty() {
-            return Err(MemoryError::Invalid("job phase and owner are required".into()));
+            return Err(MemoryError::Invalid(
+                "job phase and owner are required".into(),
+            ));
         }
         let now = now_epoch();
         let lease_until = now.saturating_add(lease_seconds.clamp(5, 3600));
@@ -196,7 +198,11 @@ impl SqliteMemoryStore {
     ) -> Result<bool> {
         let now = now_epoch();
         let retry_at = retry_after_seconds.map(|value| now.saturating_add(value.max(1)));
-        let status = if retry_at.is_some() { "RETRY" } else { "FAILED" };
+        let status = if retry_at.is_some() {
+            "RETRY"
+        } else {
+            "FAILED"
+        };
         let conn = self.writer_conn()?;
         let changed = conn
             .execute(
