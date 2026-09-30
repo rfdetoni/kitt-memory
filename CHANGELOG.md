@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.0 - 2026-09-30
+
+- Return a durable `recall_trace_id` with runtime recall so consuming agents can correlate exactly which memories were selected.
+- Add `MemoryConsumptionReceipt` persistence that distinguishes memory merely presented to a model from memory referenced or used for an action.
+- Add durable `MemoryJob` orchestration with idempotent enqueue, worker leases, attempts, retry scheduling and terminal completion/failure states.
+- Extend `kitt-memoryd` management operations for receipt recording/querying and memory-job enqueue/claim/complete/fail.
+- Migrate the SQLite store to schema v7 with receipt/job indexes while preserving Memory as the single durable semantic-memory authority.
+- Integrate the Agent CLI 0.80 recall path without reintroducing Agent-local semantic memory ownership.
+
 ## 0.5.0 - 2026-09-28
 
 - Remove the legacy Agent-memory import binary and SQLite import path.
