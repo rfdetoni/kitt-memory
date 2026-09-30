@@ -450,9 +450,8 @@ fn manage(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
                 .trim();
             let source_id = as_str(&args, "source_id")?.trim();
             let source_revision = as_str(&args, "source_revision")?.trim();
-            let anonymous_source = hash_normalized(
-                &format!("{workspace_id}|{source_kind}|{source_id}")
-            );
+            let anonymous_source =
+                hash_normalized(&format!("{workspace_id}|{source_kind}|{source_id}"));
             let anonymous_revision = hash_normalized(source_revision);
             let job = MemoryJob::new(
                 format!("lifecycle:{namespace}:{event}"),
