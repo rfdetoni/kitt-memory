@@ -1,4 +1,4 @@
-use kitt_memory_core::{MemoryConsumptionReceipt, MemoryJob, SemanticMemoryStore, RecallTrace};
+use kitt_memory_core::{MemoryConsumptionReceipt, MemoryJob, RecallTrace, SemanticMemoryStore};
 use kitt_memory_sqlite::SqliteMemoryStore;
 
 fn path() -> std::path::PathBuf {
@@ -13,20 +13,22 @@ fn path() -> std::path::PathBuf {
 fn receipts_are_idempotent_and_monotonic() {
     let db = path();
     let store = SqliteMemoryStore::open(&db).unwrap();
-    store.record_recall_trace(&RecallTrace {
-        id: "trace-1".into(),
-        namespace: "agent-cli".into(),
-        workspace_id: "ws".into(),
-        query: "q".into(),
-        planned_scopes_json: "{}".into(),
-        candidates_json: "[]".into(),
-        selected_json: "[]".into(),
-        token_cost: 1,
-        semantic_fallback: false,
-        elapsed_us: 1,
-        context_hash: "h".into(),
-        created_at: 1,
-    }).unwrap();
+    store
+        .record_recall_trace(&RecallTrace {
+            id: "trace-1".into(),
+            namespace: "agent-cli".into(),
+            workspace_id: "ws".into(),
+            query: "q".into(),
+            planned_scopes_json: "{}".into(),
+            candidates_json: "[]".into(),
+            selected_json: "[]".into(),
+            token_cost: 1,
+            semantic_fallback: false,
+            elapsed_us: 1,
+            context_hash: "h".into(),
+            created_at: 1,
+        })
+        .unwrap();
     let mut receipt = MemoryConsumptionReceipt {
         recall_trace_id: "trace-1".into(),
         memory_id: "mem-1".into(),
@@ -62,10 +64,22 @@ fn jobs_are_deduplicated_and_leased() {
     let duplicate = MemoryJob::new("extract", "session-1", "r1", "42", "digest").unwrap();
     let second = store.enqueue_memory_job(&duplicate).unwrap();
     assert_eq!(first.id, second.id);
-    let claimed = store.claim_memory_job("extract", "worker-a", 60).unwrap().unwrap();
+    let claimed = store
+        .claim_memory_job("extract", "worker-a", 60)
+        .unwrap()
+        .unwrap();
     assert_eq!(claimed.id, first.id);
     assert_eq!(claimed.status, "RUNNING");
-    assert!(store.complete_memory_job(&claimed.id, "worker-a", Some("out")).unwrap());
-    assert!(store.claim_memory_job("extract", "worker-b", 60).unwrap().is_none());
+    assert!(
+        store
+            .complete_memory_job(&claimed.id, "worker-a", Some("out"))
+            .unwrap()
+    );
+    assert!(
+        store
+            .claim_memory_job("extract", "worker-b", 60)
+            .unwrap()
+            .is_none()
+    );
     let _ = std::fs::remove_file(db);
 }
