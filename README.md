@@ -15,6 +15,14 @@ K.I.T.T. Memory is the shared persistent memory data plane used across the ecosy
 
 ---
 
+## Memory 0.6.1 — public lifecycle evidence
+
+Memory 0.6.1 exposes a neutral lifecycle ingress for external K.I.T.T. clients: `session.started`, `turn.started`, `tool.completed`, `turn.completed` and `session.ended`. These hooks do not write semantic memories directly. They enqueue the same durable, idempotent `MemoryJob` pipeline used by internal memory work, after validating the event class and reducing source identity/revision to anonymized hashes.
+
+Lifecycle callers provide only a SHA-256 digest of their evidence. Raw tool arguments, prompts, credentials and recalled-memory bodies are not persisted through this interface, and `memory`/`recall` sources are rejected to prevent recalled context from being learned again as fresh evidence.
+
+---
+
 ## Memory 0.6.0 — consumption evidence and durable jobs
 
 Memory 0.6.0 makes recall consumption and background memory work auditable without moving orchestration back into the Agent. Runtime recall returns a durable `recall_trace_id`; consumers can record `MemoryConsumptionReceipt` entries that separately represent presentation, reference and action use. This prevents a recall hit from being treated as proof that the model actually used the memory.
@@ -141,7 +149,7 @@ let baseline = store.baseline(&kitt_memory_core::BaselineQuery {
 
 ## Runtime service
 
-`kitt-memoryd` is the only durable memory authority used by the current K.I.T.T. ecosystem. The management plane includes status/pin/archive/touch, Dreaming transactions, corrections, concepts, typed concept links, recall-consumption receipts and durable background jobs. Historical Agent-local memory import is intentionally not supported by 0.6.x.
+`kitt-memoryd` is the only durable memory authority used by the current K.I.T.T. ecosystem. The management plane includes status/pin/archive/touch, Dreaming transactions, corrections, concepts, typed concept links, recall-consumption receipts, durable background jobs and privacy-safe lifecycle evidence ingress. Historical Agent-local memory import is intentionally not supported by 0.6.x.
 
 ---
 
