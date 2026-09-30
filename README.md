@@ -15,6 +15,14 @@ K.I.T.T. Memory is the shared persistent memory data plane used across the ecosy
 
 ---
 
+## Memory 0.6.0 — consumption evidence and durable jobs
+
+Memory 0.6.0 makes recall consumption and background memory work auditable without moving orchestration back into the Agent. Runtime recall returns a durable `recall_trace_id`; consumers can record `MemoryConsumptionReceipt` entries that separately represent presentation, reference and action use. This prevents a recall hit from being treated as proof that the model actually used the memory.
+
+Background extraction/consolidation work can be represented by durable `MemoryJob` rows with idempotency keys, worker leases, attempts and retry timestamps. The SQLite schema is v7 and `kitt-memoryd` remains the only durable semantic-memory authority.
+
+---
+
 ## What’s included
 
 - Pure Rust memory-domain core.
@@ -29,6 +37,8 @@ K.I.T.T. Memory is the shared persistent memory data plane used across the ecosy
 - Bounded concept-neighborhood expansion (up to four hops) for graph-aware retrieval.
 - Hierarchical context nodes with summary/navigation layers, dirty propagation and FTS-backed branch discovery.
 - Typed memory provenance, durable consolidation ChangeSets and recall traces.
+- Consumption receipts that distinguish presentation, reference and action use.
+- Idempotent durable memory jobs with leases, retries and worker-safe claiming.
 - Versioned product/plugin memory schemas without expanding the built-in memory-kind enum.
 - Namespace, global/workspace and conversation scoping with explicit `scope_key` isolation.
 - Sensitivity levels: `public`, `personal`, `private`, `secret`, `ephemeral`.
@@ -131,7 +141,7 @@ let baseline = store.baseline(&kitt_memory_core::BaselineQuery {
 
 ## Runtime service
 
-`kitt-memoryd` is the only durable memory authority used by the current K.I.T.T. ecosystem. The management plane includes status/pin/archive/touch, Dreaming transactions, corrections, concepts and typed concept links. Historical Agent-local memory import is intentionally not supported by 0.5.x.
+`kitt-memoryd` is the only durable memory authority used by the current K.I.T.T. ecosystem. The management plane includes status/pin/archive/touch, Dreaming transactions, corrections, concepts, typed concept links, recall-consumption receipts and durable background jobs. Historical Agent-local memory import is intentionally not supported by 0.6.x.
 
 ---
 
