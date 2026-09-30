@@ -1,8 +1,7 @@
 use kitt_memory_core::{
     DreamRunRecord, KnowledgeRelation, KnowledgeStore, MemoryConsumptionReceipt, MemoryJob,
     MemoryKind, MemoryRecord, MemoryScope, MemorySource, MemoryStatus, MemoryStore, NewConcept,
-    NewCorrection, NewMemory, RecallQuery, RecallTrace, SemanticMemoryStore, Sensitivity,
-    now_epoch,
+    NewCorrection, NewMemory, RecallQuery, RecallTrace, SemanticMemoryStore, Sensitivity, now_epoch,
 };
 use kitt_memory_sqlite::SqliteMemoryStore;
 use serde::{Deserialize, Serialize};
@@ -397,15 +396,19 @@ fn manage(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
         }
         "receipt.record" => {
             let receipt: MemoryConsumptionReceipt = serde_json::from_value(
-                args.get("receipt").cloned().ok_or("missing receipt")?
-            ).map_err(|e| e.to_string())?;
-            store.record_consumption_receipt(&receipt).map_err(|e| e.to_string())?;
+                args.get("receipt").cloned().ok_or("missing receipt")?,
+            )
+            .map_err(|e| e.to_string())?;
+            store
+                .record_consumption_receipt(&receipt)
+                .map_err(|e| e.to_string())?;
             Ok(json!({"recorded": true}))
         }
         "receipt.list" => {
             let workspace_id = as_str(&args, "workspace_id")?;
             let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize;
-            let receipts = store.recent_consumption_receipts(workspace_id, limit)
+            let receipts = store
+                .recent_consumption_receipts(workspace_id, limit)
                 .map_err(|e| e.to_string())?;
             Ok(json!({"receipts": receipts}))
         }
@@ -414,9 +417,12 @@ fn manage(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
                 as_str(&args, "phase")?,
                 as_str(&args, "source_id")?,
                 as_str(&args, "source_revision")?,
-                args.get("source_watermark").and_then(Value::as_str).unwrap_or(""),
+                args.get("source_watermark")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
                 as_str(&args, "input_digest")?,
-            ).map_err(|e| e.to_string())?;
+            )
+            .map_err(|e| e.to_string())?;
             let job = store.enqueue_memory_job(&job).map_err(|e| e.to_string())?;
             Ok(json!({"job": job}))
         }
@@ -424,8 +430,11 @@ fn manage(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
             let job = store.claim_memory_job(
                 as_str(&args, "phase")?,
                 as_str(&args, "owner")?,
-                args.get("lease_seconds").and_then(Value::as_i64).unwrap_or(120),
-            ).map_err(|e| e.to_string())?;
+                args.get("lease_seconds")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(120),
+            )
+            .map_err(|e| e.to_string())?;
             Ok(json!({"job": job}))
         }
         "job.complete" => {
@@ -441,7 +450,8 @@ fn manage(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
                 as_str(&args, "id")?,
                 as_str(&args, "owner")?,
                 args.get("retry_after_seconds").and_then(Value::as_i64),
-            ).map_err(|e| e.to_string())?;
+            )
+            .map_err(|e| e.to_string())?;
             Ok(json!({"changed": changed}))
         }
         "maintenance" => {
@@ -524,9 +534,20 @@ fn handle(store: &SqliteMemoryStore, frame: Frame, token: &str) -> ResponseEnvel
             let p = &frame.envelope.payload;
             let started = Instant::now();
             let query = RecallQuery {
-                namespace: p.get("namespace").and_then(Value::as_str).unwrap_or("agent-cli").to_string(),
-                workspace_id: p.get("workspace_id").and_then(Value::as_str).unwrap_or("").to_string(),
-                scope_key: p.get("scope_key").and_then(Value::as_str).map(str::to_string),
+                namespace: p
+                    .get("namespace")
+                    .and_then(Value::as_str)
+                    .unwrap_or("agent-cli")
+                    .to_string(),
+                workspace_id: p
+                    .get("workspace_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                scope_key: p
+                    .get("scope_key")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 text: p.get("query").and_then(Value::as_str).unwrap_or("").to_string(),
                 limit: p.get("limit").and_then(Value::as_u64).unwrap_or(8) as usize,
                 as_of: p.get("as_of").and_then(Value::as_i64),
@@ -539,11 +560,16 @@ fn handle(store: &SqliteMemoryStore, frame: Frame, token: &str) -> ResponseEnvel
                 match store.recall(&query) {
                     Ok(records) => {
                         let trace_id = format!("recall_{}", Uuid::new_v4().simple());
-                        let selected = records.iter().map(|record| record.id.clone()).collect::<Vec<_>>();
-                        let selected_json = serde_json::to_string(&selected).unwrap_or_else(|_| "[]".into());
-                        let context_hash = kitt_memory_core::hash_normalized(
-                            &format!("{}|{}|{}", query.namespace, query.workspace_id, selected_json)
-                        );
+                        let selected = records
+                            .iter()
+                            .map(|record| record.id.clone())
+                            .collect::<Vec<_>>();
+                        let selected_json =
+                            serde_json::to_string(&selected).unwrap_or_else(|_| "[]".into());
+                        let context_hash = kitt_memory_core::hash_normalized(&format!(
+                            "{}|{}|{}",
+                            query.namespace, query.workspace_id, selected_json
+                        ));
                         let trace = RecallTrace {
                             id: trace_id.clone(),
                             namespace: query.namespace.clone(),
@@ -554,10 +580,14 @@ fn handle(store: &SqliteMemoryStore, frame: Frame, token: &str) -> ResponseEnvel
                                 "as_of": query.as_of,
                                 "allow_private": query.allow_private,
                                 "allow_secret": query.allow_secret
-                            })).unwrap_or_else(|_| "{}".into()),
+                            }))
+                            .unwrap_or_else(|_| "{}".into()),
                             candidates_json: selected_json.clone(),
                             selected_json,
-                            token_cost: records.iter().map(|record| ((record.content.len() + 3) / 4) as u64).sum(),
+                            token_cost: records
+                                .iter()
+                                .map(|record| ((record.content.len() + 3) / 4) as u64)
+                                .sum(),
                             semantic_fallback: false,
                             elapsed_us: started.elapsed().as_micros().min(u64::MAX as u128) as u64,
                             context_hash,
@@ -566,10 +596,14 @@ fn handle(store: &SqliteMemoryStore, frame: Frame, token: &str) -> ResponseEnvel
                         if let Err(err) = store.record_recall_trace(&trace) {
                             error(Some(id), "memory_error", err.to_string())
                         } else {
-                            response("memory.recall.response", id, json!({
-                                "records": records,
-                                "recall_trace_id": trace_id
-                            }))
+                            response(
+                                "memory.recall.response",
+                                id,
+                                json!({
+                                    "records": records,
+                                    "recall_trace_id": trace_id
+                                }),
+                            )
                         }
                     }
                     Err(message) => error(Some(id), "memory_error", message.to_string()),
