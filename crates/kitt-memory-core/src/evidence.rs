@@ -71,7 +71,11 @@ impl MemoryJob {
         let source_revision = source_revision.into().trim().to_string();
         let source_watermark = source_watermark.into().trim().to_string();
         let input_digest = input_digest.into().trim().to_string();
-        if phase.is_empty() || source_id.is_empty() || source_revision.is_empty() || input_digest.is_empty() {
+        if phase.is_empty()
+            || source_id.is_empty()
+            || source_revision.is_empty()
+            || input_digest.is_empty()
+        {
             return Err(MemoryError::Invalid(
                 "memory job phase/source/revision/input_digest are required".into(),
             ));
