@@ -600,7 +600,7 @@ fn handle(store: &SqliteMemoryStore, frame: Frame, token: &str) -> ResponseEnvel
                             selected_json,
                             token_cost: records
                                 .iter()
-                                .map(|record| ((record.content.len() + 3) / 4) as u64)
+                                .map(|record| record.content.len().div_ceil(4) as u64)
                                 .sum(),
                             semantic_fallback: false,
                             elapsed_us: started.elapsed().as_micros().min(u64::MAX as u128) as u64,
