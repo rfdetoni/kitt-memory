@@ -5,11 +5,13 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub mod baseline;
+pub mod evidence;
 pub mod knowledge;
 pub mod ranking;
 pub mod semantic;
 
 pub use baseline::{BaselineEntry, BaselineQuery, MemoryBaseline, build_memory_baseline};
+pub use evidence::{MemoryConsumptionReceipt, MemoryJob};
 pub use knowledge::{
     CorrectionRecord, KnowledgeEdge, KnowledgeRelation, KnowledgeStore, NewConcept, NewCorrection,
     StoredConcept,

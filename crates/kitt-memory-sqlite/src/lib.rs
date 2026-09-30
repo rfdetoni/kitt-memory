@@ -19,9 +19,10 @@ use std::{
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 mod admin;
+mod evidence;
 mod semantic;
 
-const STORE_SCHEMA_VERSION: i64 = 6;
+const STORE_SCHEMA_VERSION: i64 = 7;
 const MEMORY_COLUMNS: &str = "m.id,m.namespace,m.workspace_id,m.kind,m.content,m.normalized_content,m.status,m.sensitivity,m.scope,m.scope_key,m.importance,m.confidence,m.created_at,m.updated_at,m.last_accessed_at,m.access_count,m.valid_from,m.valid_until,m.supersedes_id,m.content_hash,m.pinned,m.metadata_json";
 
 fn ensure_private_database_file(path: &Path) -> Result<()> {
@@ -1015,7 +1016,9 @@ fn migrate(conn: &mut Connection) -> std::result::Result<(), rusqlite::Error> {
  CREATE TABLE IF NOT EXISTS memory_changes(id TEXT PRIMARY KEY,change_set_id TEXT NOT NULL,memory_id TEXT,operation TEXT NOT NULL,before_json TEXT,after_json TEXT,evidence_json TEXT NOT NULL DEFAULT '[]',reason_code TEXT NOT NULL,FOREIGN KEY(change_set_id) REFERENCES memory_change_sets(id) ON DELETE CASCADE);
  CREATE TABLE IF NOT EXISTS recall_traces(id TEXT PRIMARY KEY,namespace TEXT NOT NULL,workspace_id TEXT NOT NULL,query TEXT NOT NULL,planned_scopes_json TEXT NOT NULL,candidates_json TEXT NOT NULL,selected_json TEXT NOT NULL,token_cost INTEGER NOT NULL,semantic_fallback INTEGER NOT NULL,elapsed_us INTEGER NOT NULL,context_hash TEXT NOT NULL,created_at INTEGER NOT NULL);
  CREATE TABLE IF NOT EXISTS memory_schemas(schema_id TEXT NOT NULL,version INTEGER NOT NULL,base_kind TEXT NOT NULL,fields_schema_json TEXT NOT NULL,retention_policy_json TEXT NOT NULL,merge_policy_json TEXT NOT NULL,default_sensitivity TEXT NOT NULL,index_fields_json TEXT NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(schema_id,version));
- CREATE TABLE IF NOT EXISTS dream_runs(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,started_at INTEGER NOT NULL,finished_at INTEGER,status TEXT NOT NULL,sessions_scanned INTEGER NOT NULL DEFAULT 0,entries_scanned INTEGER NOT NULL DEFAULT 0,signals_found INTEGER NOT NULL DEFAULT 0,memories_added INTEGER NOT NULL DEFAULT 0,memories_merged INTEGER NOT NULL DEFAULT 0,memories_superseded INTEGER NOT NULL DEFAULT 0,memories_archived INTEGER NOT NULL DEFAULT 0,model TEXT NOT NULL DEFAULT '',input_tokens INTEGER NOT NULL DEFAULT 0,output_tokens INTEGER NOT NULL DEFAULT 0,failure_reason TEXT,dry_run INTEGER NOT NULL DEFAULT 0);"#)?;
+ CREATE TABLE IF NOT EXISTS dream_runs(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,started_at INTEGER NOT NULL,finished_at INTEGER,status TEXT NOT NULL,sessions_scanned INTEGER NOT NULL DEFAULT 0,entries_scanned INTEGER NOT NULL DEFAULT 0,signals_found INTEGER NOT NULL DEFAULT 0,memories_added INTEGER NOT NULL DEFAULT 0,memories_merged INTEGER NOT NULL DEFAULT 0,memories_superseded INTEGER NOT NULL DEFAULT 0,memories_archived INTEGER NOT NULL DEFAULT 0,model TEXT NOT NULL DEFAULT '',input_tokens INTEGER NOT NULL DEFAULT 0,output_tokens INTEGER NOT NULL DEFAULT 0,failure_reason TEXT,dry_run INTEGER NOT NULL DEFAULT 0);
+ CREATE TABLE IF NOT EXISTS memory_consumption_receipts(recall_trace_id TEXT NOT NULL,memory_id TEXT NOT NULL,consumer TEXT NOT NULL,purpose TEXT NOT NULL,presented INTEGER NOT NULL DEFAULT 0,referenced INTEGER NOT NULL DEFAULT 0,used_for_action INTEGER NOT NULL DEFAULT 0,outcome TEXT NOT NULL DEFAULT '',turn_id TEXT NOT NULL,consumed_at INTEGER NOT NULL,PRIMARY KEY(recall_trace_id,memory_id,consumer,purpose,turn_id),FOREIGN KEY(recall_trace_id) REFERENCES recall_traces(id) ON DELETE CASCADE);
+ CREATE TABLE IF NOT EXISTS memory_jobs(id TEXT PRIMARY KEY,phase TEXT NOT NULL,source_id TEXT NOT NULL,source_revision TEXT NOT NULL,source_watermark TEXT NOT NULL DEFAULT '',status TEXT NOT NULL,lease_owner TEXT,lease_until INTEGER,attempt INTEGER NOT NULL DEFAULT 0,next_retry_at INTEGER,input_digest TEXT NOT NULL,output_digest TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(phase,source_id,source_revision,input_digest));"#)?;
     let current = tx.query_row("SELECT version FROM schema_info LIMIT 1", [], |r| {
         r.get::<_, i64>(0)
     })?;
@@ -1064,6 +1067,8 @@ fn migrate(conn: &mut Connection) -> std::result::Result<(), rusqlite::Error> {
  CREATE INDEX IF NOT EXISTS idx_memory_change_sets_workspace ON memory_change_sets(workspace_id,started_at);
  CREATE INDEX IF NOT EXISTS idx_recall_traces_workspace ON recall_traces(workspace_id,created_at);
  CREATE INDEX IF NOT EXISTS idx_dream_runs_workspace ON dream_runs(workspace_id,finished_at,started_at);
+ CREATE INDEX IF NOT EXISTS idx_memory_receipts_trace ON memory_consumption_receipts(recall_trace_id,consumed_at);
+ CREATE INDEX IF NOT EXISTS idx_memory_jobs_claim ON memory_jobs(phase,status,next_retry_at,lease_until,created_at);
  CREATE INDEX IF NOT EXISTS idx_corrections_scope ON corrections(namespace,workspace_id,applied_count,updated_at);CREATE INDEX IF NOT EXISTS idx_concepts_scope ON concepts(namespace,workspace_id,confidence,updated_at);CREATE INDEX IF NOT EXISTS idx_concept_links_source ON concept_links(namespace,workspace_id,source_id);CREATE INDEX IF NOT EXISTS idx_concept_links_target ON concept_links(namespace,workspace_id,target_id);
  DROP TRIGGER IF EXISTS memories_fts_insert;DROP TRIGGER IF EXISTS memories_fts_delete;DROP TRIGGER IF EXISTS memories_fts_update;
  CREATE TRIGGER memories_fts_insert AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(rowid,id,namespace,workspace_id,content,normalized_content) VALUES(new.rowid,new.id,new.namespace,new.workspace_id,new.content,new.normalized_content);END;
@@ -1091,6 +1096,14 @@ fn migrate(conn: &mut Connection) -> std::result::Result<(), rusqlite::Error> {
     if current < 6 {
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS dream_runs(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,started_at INTEGER NOT NULL,finished_at INTEGER,status TEXT NOT NULL,sessions_scanned INTEGER NOT NULL DEFAULT 0,entries_scanned INTEGER NOT NULL DEFAULT 0,signals_found INTEGER NOT NULL DEFAULT 0,memories_added INTEGER NOT NULL DEFAULT 0,memories_merged INTEGER NOT NULL DEFAULT 0,memories_superseded INTEGER NOT NULL DEFAULT 0,memories_archived INTEGER NOT NULL DEFAULT 0,model TEXT NOT NULL DEFAULT '',input_tokens INTEGER NOT NULL DEFAULT 0,output_tokens INTEGER NOT NULL DEFAULT 0,failure_reason TEXT,dry_run INTEGER NOT NULL DEFAULT 0);CREATE INDEX IF NOT EXISTS idx_dream_runs_workspace ON dream_runs(workspace_id,finished_at,started_at);"
+        )?;
+    }
+    if current < 7 {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS memory_consumption_receipts(recall_trace_id TEXT NOT NULL,memory_id TEXT NOT NULL,consumer TEXT NOT NULL,purpose TEXT NOT NULL,presented INTEGER NOT NULL DEFAULT 0,referenced INTEGER NOT NULL DEFAULT 0,used_for_action INTEGER NOT NULL DEFAULT 0,outcome TEXT NOT NULL DEFAULT '',turn_id TEXT NOT NULL,consumed_at INTEGER NOT NULL,PRIMARY KEY(recall_trace_id,memory_id,consumer,purpose,turn_id),FOREIGN KEY(recall_trace_id) REFERENCES recall_traces(id) ON DELETE CASCADE);
+             CREATE TABLE IF NOT EXISTS memory_jobs(id TEXT PRIMARY KEY,phase TEXT NOT NULL,source_id TEXT NOT NULL,source_revision TEXT NOT NULL,source_watermark TEXT NOT NULL DEFAULT '',status TEXT NOT NULL,lease_owner TEXT,lease_until INTEGER,attempt INTEGER NOT NULL DEFAULT 0,next_retry_at INTEGER,input_digest TEXT NOT NULL,output_digest TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(phase,source_id,source_revision,input_digest));
+             CREATE INDEX IF NOT EXISTS idx_memory_receipts_trace ON memory_consumption_receipts(recall_trace_id,consumed_at);
+             CREATE INDEX IF NOT EXISTS idx_memory_jobs_claim ON memory_jobs(phase,status,next_retry_at,lease_until,created_at);"
         )?;
     }
     if current < STORE_SCHEMA_VERSION {
