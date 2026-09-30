@@ -219,20 +219,6 @@ MIT. See [LICENSE](LICENSE).
 `search_concept_neighborhood` combines FTS concept seeds with bounded graph expansion. The default expansion is cycle-safe, scoped to the same namespace/workspace, capped at four hops and one hundred concepts, and does not introduce a graph-database dependency.
 
 
-## v0.2 storage contract
-
-Schema v4 makes conversation isolation explicit through `scope_key`, canonicalizes new global memories to the global scope, rejects unknown persisted enum values instead of silently coercing them, and applies sensitivity filtering before candidate limits. `RecallQuery::as_of` enables historical retrieval without mutating access telemetry.
-
-Corrections and concepts retain sensitivity and source-memory provenance. Derived knowledge should inherit the most restrictive sensitivity of its inputs.
-
-
-## 0.2.1 integration contract
-
-Version 0.2.1 clarifies the ecosystem authority boundary without changing schema v4: `kitt-memory` is the shared structured data plane, while a consuming product remains responsible for its own durable product-originated state. Consumers must merge shared recall with their local authoritative records rather than switching authorities based on daemon availability. Markdown projections/recovery files are not structured memory authorities.
-
-For Agent CLI 0.74.4+, Agent-originated project memories are committed to the Agent structured store first and mirrored to `kitt-memory` when the resident service is available. This makes shared-memory availability additive and prevents reconnects from hiding locally durable knowledge.
-
-
 ## 0.3 semantic context architecture
 
 Schema v5 adds a semantic navigation layer above the existing memory records. Context nodes are projections and indexes; they do not replace `memories` as the durable shared-memory authority.
@@ -263,10 +249,10 @@ The schema registry lets a product or plugin define specialized memory shapes, r
 
 
 
-## 0.5 standalone memory service
+## 0.6 standalone memory service
 
 `kitt-memoryd` is now the canonical runtime owner of durable KITT memory. It listens on loopback only (default `127.0.0.1:41829`), stores its token under the KITT memory config directory, and stores SQLite state under the KITT memory data directory.
 
-The hot path exposes protocol-v1 `memory.remember`, `memory.recall` and `memory.forget`. The bounded `memory.manage` control plane owns status changes, pin/archive/touch operations, dream-run history, atomic dream commits, corrections, concepts, typed concept links and maintenance. Agent-side code may propose dream operations, but only kitt-memory persists memory state and provenance.
+The hot path exposes protocol-v1 `memory.remember`, `memory.recall` and `memory.forget`. Recall responses include a durable trace identity so consumers can record presentation/reference/action receipts without conflating retrieval with actual use. The bounded `memory.manage` control plane owns status changes, pin/archive/touch operations, dream-run history, atomic dream commits, corrections, concepts, typed concept links, consumption receipts, leased background jobs and maintenance. Agent-side code may propose work, but only kitt-memory persists semantic memory state and provenance.
 
 Environment overrides: `KITT_MEMORY_ADDR`, `KITT_MEMORY_CONFIG_DIR`, `KITT_MEMORY_DATA_DIR`, `KITT_MEMORY_TOKEN_PATH`, `KITT_MEMORY_DB`.
