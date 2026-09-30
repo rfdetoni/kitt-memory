@@ -2,7 +2,7 @@ use kitt_memory_core::{
     DreamRunRecord, KnowledgeRelation, KnowledgeStore, MemoryConsumptionReceipt, MemoryJob,
     MemoryKind, MemoryRecord, MemoryScope, MemorySource, MemoryStatus, MemoryStore, NewConcept,
     NewCorrection, NewMemory, RecallQuery, RecallTrace, SemanticMemoryStore, Sensitivity,
-    now_epoch,
+    hash_normalized, now_epoch,
 };
 use kitt_memory_sqlite::SqliteMemoryStore;
 use serde::{Deserialize, Serialize};
@@ -411,6 +411,59 @@ fn manage(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
                 .recent_consumption_receipts(workspace_id, limit)
                 .map_err(|e| e.to_string())?;
             Ok(json!({"receipts": receipts}))
+        }
+        "lifecycle.ingest" => {
+            let event = as_str(&args, "event")?.trim();
+            if !matches!(
+                event,
+                "session.started"
+                    | "turn.started"
+                    | "tool.completed"
+                    | "turn.completed"
+                    | "session.ended"
+            ) {
+                return Err("unsupported lifecycle event".into());
+            }
+            let source_kind = args
+                .get("source_kind")
+                .and_then(Value::as_str)
+                .unwrap_or("external")
+                .trim()
+                .to_ascii_lowercase();
+            if source_kind.is_empty()
+                || source_kind.contains("memory")
+                || source_kind.contains("recall")
+            {
+                return Err("lifecycle source_kind is not eligible evidence".into());
+            }
+            let input_digest = as_str(&args, "input_digest")?.trim();
+            if input_digest.len() != 64
+                || !input_digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err("lifecycle input_digest must be a SHA-256 hex digest".into());
+            }
+            let workspace_id = as_str(&args, "workspace_id")?.trim();
+            let namespace = args
+                .get("namespace")
+                .and_then(Value::as_str)
+                .unwrap_or("external")
+                .trim();
+            let source_id = as_str(&args, "source_id")?.trim();
+            let source_revision = as_str(&args, "source_revision")?.trim();
+            let anonymous_source = hash_normalized(
+                &format!("{workspace_id}|{source_kind}|{source_id}")
+            );
+            let anonymous_revision = hash_normalized(source_revision);
+            let job = MemoryJob::new(
+                format!("lifecycle:{namespace}:{event}"),
+                anonymous_source,
+                anonymous_revision,
+                event,
+                input_digest,
+            )
+            .map_err(|e| e.to_string())?;
+            let job = store.enqueue_memory_job(&job).map_err(|e| e.to_string())?;
+            Ok(json!({"job": job, "accepted": true}))
         }
         "job.enqueue" => {
             let job = MemoryJob::new(
