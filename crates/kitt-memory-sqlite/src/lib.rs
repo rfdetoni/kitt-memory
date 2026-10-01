@@ -22,6 +22,8 @@ mod admin;
 mod evidence;
 mod semantic;
 
+pub use semantic::TimelineMemoryQuery;
+
 const STORE_SCHEMA_VERSION: i64 = 7;
 const MEMORY_COLUMNS: &str = "m.id,m.namespace,m.workspace_id,m.kind,m.content,m.normalized_content,m.status,m.sensitivity,m.scope,m.scope_key,m.importance,m.confidence,m.created_at,m.updated_at,m.last_accessed_at,m.access_count,m.valid_from,m.valid_until,m.supersedes_id,m.content_hash,m.pinned,m.metadata_json";
 

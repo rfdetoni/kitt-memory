@@ -31,6 +31,137 @@ fn map_context(row: &rusqlite::Row<'_>) -> std::result::Result<ContextNode, rusq
 
 const CONTEXT_COLUMNS: &str = "id,parent_id,namespace,workspace_id,path,summary,navigation_summary,generation,content_hash,dirty_children,total_children,summarized_at,sensitivity,created_at,updated_at";
 
+#[derive(Debug, Clone)]
+pub struct TimelineMemoryQuery<'a> {
+    pub namespace: &'a str,
+    pub workspace_id: &'a str,
+    pub source_id: Option<&'a str>,
+    pub scope_key: Option<&'a str>,
+    pub around: Option<i64>,
+    pub limit: usize,
+    pub allow_private: bool,
+    pub allow_secret: bool,
+}
+
+impl SqliteMemoryStore {
+    /// Fetch selected memories without broadening conversation scope.
+    ///
+    /// This is the hydration half of progressive retrieval. Search can return
+    /// bounded snippets first; callers explicitly select IDs to hydrate later.
+    pub fn get_many_scoped(
+        &self,
+        namespace: &str,
+        workspace_id: &str,
+        scope_key: Option<&str>,
+        ids: &[String],
+        allow_private: bool,
+        allow_secret: bool,
+    ) -> Result<Vec<MemoryRecord>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let bounded_ids = ids.iter().take(128).cloned().collect::<Vec<_>>();
+        let placeholders = (0..bounded_ids.len())
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT {MEMORY_COLUMNS} FROM memories m
+             WHERE m.namespace=?
+               AND (
+                 m.scope='global'
+                 OR (m.workspace_id=? AND m.scope='workspace')
+                 OR (m.workspace_id=? AND m.scope='conversation' AND m.scope_key=?)
+               )
+               AND m.status='ACTIVE'
+               AND m.sensitivity<>'ephemeral'
+               AND (m.sensitivity<>'private' OR ?=1)
+               AND (m.sensitivity<>'secret' OR ?=1)
+               AND m.id IN ({placeholders})"
+        );
+        let mut values = Vec::<rusqlite::types::Value>::with_capacity(6 + bounded_ids.len());
+        values.push(namespace.to_string().into());
+        values.push(workspace_id.to_string().into());
+        values.push(workspace_id.to_string().into());
+        values.push(scope_key.unwrap_or("").to_string().into());
+        values.push((allow_private as i64).into());
+        values.push((allow_secret as i64).into());
+        values.extend(
+            bounded_ids
+                .iter()
+                .cloned()
+                .map(rusqlite::types::Value::from),
+        );
+        let rows = self.with_conn(|conn| {
+            let mut stmt = conn.prepare(&sql)?;
+            stmt.query_map(rusqlite::params_from_iter(values), map_memory_row)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+        })?;
+        let by_id = rows
+            .into_iter()
+            .map(|record| (record.id.clone(), record))
+            .collect::<HashMap<_, _>>();
+        Ok(bounded_ids
+            .iter()
+            .filter_map(|id| by_id.get(id).cloned())
+            .collect())
+    }
+
+    /// Return memories in temporal order, optionally narrowed to one provenance source.
+    pub fn timeline_memories(&self, query: &TimelineMemoryQuery<'_>) -> Result<Vec<MemoryRecord>> {
+        if query.limit == 0 {
+            return Ok(Vec::new());
+        }
+        let source = query.source_id.unwrap_or("");
+        let order = if query.around.is_some() {
+            "ABS(m.updated_at-?) ASC,m.updated_at DESC,m.id ASC"
+        } else {
+            "m.updated_at DESC,m.id ASC"
+        };
+        let source_clause = if source.is_empty() {
+            ""
+        } else {
+            "AND m.id IN (SELECT memory_id FROM memory_sources WHERE source_id=?)"
+        };
+        let sql = format!(
+            "SELECT {MEMORY_COLUMNS} FROM memories m
+             WHERE m.namespace=?
+               AND (
+                 m.scope='global'
+                 OR (m.workspace_id=? AND m.scope='workspace')
+                 OR (m.workspace_id=? AND m.scope='conversation' AND m.scope_key=?)
+               )
+               AND m.status='ACTIVE'
+               AND m.sensitivity<>'ephemeral'
+               AND (m.sensitivity<>'private' OR ?=1)
+               AND (m.sensitivity<>'secret' OR ?=1)
+               {source_clause}
+             ORDER BY {order}
+             LIMIT ?"
+        );
+        let mut values: Vec<rusqlite::types::Value> = vec![
+            query.namespace.to_string().into(),
+            query.workspace_id.to_string().into(),
+            query.workspace_id.to_string().into(),
+            query.scope_key.unwrap_or("").to_string().into(),
+            (query.allow_private as i64).into(),
+            (query.allow_secret as i64).into(),
+        ];
+        if !source.is_empty() {
+            values.push(source.to_string().into());
+        }
+        if let Some(at) = query.around {
+            values.push(at.into());
+        }
+        values.push((query.limit.min(128) as i64).into());
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(&sql)?;
+            stmt.query_map(rusqlite::params_from_iter(values), map_memory_row)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+        })
+    }
+}
+
 impl SemanticMemoryStore for SqliteMemoryStore {
     fn upsert_context_node(&self, node: NewContextNode) -> Result<ContextNode> {
         let node = node.into_record()?;

@@ -11,7 +11,9 @@ pub mod ranking;
 pub mod semantic;
 
 pub use baseline::{BaselineEntry, BaselineQuery, MemoryBaseline, build_memory_baseline};
-pub use evidence::{MemoryConsumptionReceipt, MemoryJob};
+pub use evidence::{
+    EvidenceAssessment, EvidenceOrigin, MemoryConsumptionReceipt, MemoryJob, assess_evidence,
+};
 pub use knowledge::{
     CorrectionRecord, KnowledgeEdge, KnowledgeRelation, KnowledgeStore, NewConcept, NewCorrection,
     StoredConcept,

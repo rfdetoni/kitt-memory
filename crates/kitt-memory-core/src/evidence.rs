@@ -3,6 +3,60 @@ use uuid::Uuid;
 
 use crate::{MemoryError, Result, now_epoch};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum EvidenceOrigin {
+    Human,
+    Assistant,
+    Subagent,
+    Tool,
+    Repository,
+    Memory,
+    Skill,
+    Plugin,
+    Harness,
+    System,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EvidenceAssessment {
+    pub origin: EvidenceOrigin,
+    pub class: String,
+    pub priority: u8,
+    pub learnable: bool,
+}
+
+pub fn assess_evidence(origin: EvidenceOrigin, class: &str) -> EvidenceAssessment {
+    let normalized = class.trim().replace('-', "_").to_ascii_uppercase();
+    let priority = match normalized.as_str() {
+        "USER_CORRECTION" | "USER_EXPLICIT_RULE" => 100,
+        "USER_DECISION" => 95,
+        "VERIFIED_RESULT" | "VALIDATION_EVIDENCE" => 90,
+        "FINAL_RESULT" => 85,
+        "REPOSITORY_FACT" => 80,
+        "SUBAGENT_RESULT" => 70,
+        "ASSISTANT_PROGRESS" => 40,
+        "TOOL_RESULT" => 30,
+        "ENVIRONMENT_CONTEXT" => 20,
+        _ => 10,
+    };
+    let learnable = !matches!(
+        origin,
+        EvidenceOrigin::Memory
+            | EvidenceOrigin::Skill
+            | EvidenceOrigin::Plugin
+            | EvidenceOrigin::Harness
+            | EvidenceOrigin::System
+    );
+    EvidenceAssessment {
+        origin,
+        class: normalized,
+        priority,
+        learnable,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryConsumptionReceipt {
