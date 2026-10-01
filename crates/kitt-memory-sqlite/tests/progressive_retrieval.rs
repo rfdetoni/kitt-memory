@@ -2,7 +2,7 @@ use kitt_memory_core::{
     MemoryKind, MemoryScope, MemoryStore, NewMemory, NewMemorySource, SemanticMemoryStore,
     Sensitivity,
 };
-use kitt_memory_sqlite::SqliteMemoryStore;
+use kitt_memory_sqlite::{SqliteMemoryStore, TimelineMemoryQuery};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -144,16 +144,16 @@ fn timeline_filters_by_source_and_conversation_scope() {
         .unwrap();
 
     let rows = store
-        .timeline_memories(
-            "agent-cli",
-            "ws",
-            Some("session-1"),
-            Some("conv-1"),
-            None,
-            10,
-            true,
-            false,
-        )
+        .timeline_memories(&TimelineMemoryQuery {
+            namespace: "agent-cli",
+            workspace_id: "ws",
+            source_id: Some("session-1"),
+            scope_key: Some("conv-1"),
+            around: None,
+            limit: 10,
+            allow_private: true,
+            allow_secret: false,
+        })
         .unwrap();
     assert_eq!(
         vec![conv],
