@@ -197,20 +197,46 @@ impl SqliteMemoryStore {
         retry_after_seconds: Option<i64>,
     ) -> Result<bool> {
         let now = now_epoch();
-        let retry_at = retry_after_seconds.map(|value| now.saturating_add(value.max(1)));
-        let status = if retry_at.is_some() {
-            "RETRY"
-        } else {
-            "FAILED"
+        let conn = self.writer_conn()?;
+        let attempt: Option<i64> = conn
+            .query_row(
+                "SELECT attempt FROM memory_jobs
+                 WHERE id=?1 AND status='RUNNING' AND lease_owner=?2",
+                params![id, owner],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        let Some(attempt) = attempt else {
+            return Ok(false);
         };
+        let bounded_attempt = attempt.clamp(1, 31) as u32;
+        let delay = retry_after_seconds.unwrap_or_else(|| {
+            let exponent = bounded_attempt.saturating_sub(1).min(10);
+            5_i64.saturating_mul(1_i64 << exponent).min(3600)
+        });
+        let retry_at = now.saturating_add(delay.clamp(1, 3600));
+        let changed = conn
+            .execute(
+                "UPDATE memory_jobs
+                 SET status='RETRY',lease_owner=NULL,lease_until=NULL,
+                     next_retry_at=?1,updated_at=?2
+                 WHERE id=?3 AND status='RUNNING' AND lease_owner=?4",
+                params![retry_at, now, id, owner],
+            )
+            .map_err(storage)?;
+        Ok(changed == 1)
+    }
+
+    pub fn terminal_memory_job_failure(&self, id: &str, owner: &str) -> Result<bool> {
         let conn = self.writer_conn()?;
         let changed = conn
             .execute(
                 "UPDATE memory_jobs
-                 SET status=?1,lease_owner=NULL,lease_until=NULL,
-                     next_retry_at=?2,updated_at=?3
-                 WHERE id=?4 AND status='RUNNING' AND lease_owner=?5",
-                params![status, retry_at, now, id, owner],
+                 SET status='FAILED',lease_owner=NULL,lease_until=NULL,
+                     next_retry_at=NULL,updated_at=?1
+                 WHERE id=?2 AND status='RUNNING' AND lease_owner=?3",
+                params![now_epoch(), id, owner],
             )
             .map_err(storage)?;
         Ok(changed == 1)
