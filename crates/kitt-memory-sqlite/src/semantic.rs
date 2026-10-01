@@ -31,6 +31,18 @@ fn map_context(row: &rusqlite::Row<'_>) -> std::result::Result<ContextNode, rusq
 
 const CONTEXT_COLUMNS: &str = "id,parent_id,namespace,workspace_id,path,summary,navigation_summary,generation,content_hash,dirty_children,total_children,summarized_at,sensitivity,created_at,updated_at";
 
+#[derive(Debug, Clone)]
+pub struct TimelineMemoryQuery<'a> {
+    pub namespace: &'a str,
+    pub workspace_id: &'a str,
+    pub source_id: Option<&'a str>,
+    pub scope_key: Option<&'a str>,
+    pub around: Option<i64>,
+    pub limit: usize,
+    pub allow_private: bool,
+    pub allow_secret: bool,
+}
+
 impl SqliteMemoryStore {
     /// Fetch selected memories without broadening conversation scope.
     ///
@@ -98,20 +110,13 @@ impl SqliteMemoryStore {
     /// Return memories in temporal order, optionally narrowed to one provenance source.
     pub fn timeline_memories(
         &self,
-        namespace: &str,
-        workspace_id: &str,
-        source_id: Option<&str>,
-        scope_key: Option<&str>,
-        around: Option<i64>,
-        limit: usize,
-        allow_private: bool,
-        allow_secret: bool,
+        query: &TimelineMemoryQuery<'_>,
     ) -> Result<Vec<MemoryRecord>> {
-        if limit == 0 {
+        if query.limit == 0 {
             return Ok(Vec::new());
         }
-        let source = source_id.unwrap_or("");
-        let order = if around.is_some() {
+        let source = query.source_id.unwrap_or("");
+        let order = if query.around.is_some() {
             "ABS(m.updated_at-?) ASC,m.updated_at DESC,m.id ASC"
         } else {
             "m.updated_at DESC,m.id ASC"
@@ -137,20 +142,21 @@ impl SqliteMemoryStore {
              ORDER BY {order}
              LIMIT ?"
         );
-        let mut values = Vec::<rusqlite::types::Value>::new();
-        values.push(namespace.to_string().into());
-        values.push(workspace_id.to_string().into());
-        values.push(workspace_id.to_string().into());
-        values.push(scope_key.unwrap_or("").to_string().into());
-        values.push((allow_private as i64).into());
-        values.push((allow_secret as i64).into());
+        let mut values = vec![
+            query.namespace.to_string().into(),
+            query.workspace_id.to_string().into(),
+            query.workspace_id.to_string().into(),
+            query.scope_key.unwrap_or("").to_string().into(),
+            (query.allow_private as i64).into(),
+            (query.allow_secret as i64).into(),
+        ];
         if !source.is_empty() {
             values.push(source.to_string().into());
         }
-        if let Some(at) = around {
+        if let Some(at) = query.around {
             values.push(at.into());
         }
-        values.push((limit.min(128) as i64).into());
+        values.push((query.limit.min(128) as i64).into());
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(&sql)?;
             stmt.query_map(rusqlite::params_from_iter(values), map_memory_row)?
