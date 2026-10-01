@@ -151,22 +151,13 @@ impl SqliteMemoryStore {
     ) -> Result<Vec<MemoryRecord>> {
         let limit = limit.clamp(1, 128) as i64;
         let scope_key = scope_key.unwrap_or("");
-        let source_id = source_id.map(str::trim).filter(|value| !value.is_empty());
+        let source_id = source_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("");
+        let around_enabled = around.is_some() as i64;
         let around_value = around.unwrap_or_else(now_epoch);
         self.with_conn(|conn| {
-            let source_clause = if source_id.is_some() {
-                "AND EXISTS (
-                    SELECT 1 FROM memory_sources s
-                    WHERE s.memory_id=m.id AND s.source_id=?8
-                )"
-            } else {
-                ""
-            };
-            let ordering = if around.is_some() {
-                "ORDER BY ABS(m.updated_at-?7) ASC,m.updated_at DESC,m.id ASC"
-            } else {
-                "ORDER BY m.updated_at DESC,m.id ASC"
-            };
             let sql = format!(
                 "SELECT {MEMORY_COLUMNS} FROM memories m
                  WHERE m.namespace=?1
@@ -177,41 +168,30 @@ impl SqliteMemoryStore {
                    AND m.sensitivity<>'ephemeral'
                    AND (m.sensitivity<>'private' OR ?4=1)
                    AND (m.sensitivity<>'secret' OR ?5=1)
-                   {source_clause}
-                 {ordering}
-                 LIMIT ?6"
+                   AND (?6='' OR EXISTS (
+                     SELECT 1 FROM memory_sources s
+                     WHERE s.memory_id=m.id AND s.source_id=?6
+                   ))
+                 ORDER BY CASE WHEN ?7=1 THEN ABS(m.updated_at-?8) ELSE 0 END ASC,
+                          m.updated_at DESC,m.id ASC
+                 LIMIT ?9"
             );
             let mut stmt = conn.prepare(&sql)?;
-            if let Some(source_id) = source_id {
-                stmt.query_map(
-                    params![
-                        namespace,
-                        workspace_id,
-                        scope_key,
-                        allow_private as i64,
-                        allow_secret as i64,
-                        limit,
-                        around_value,
-                        source_id
-                    ],
-                    map_memory_row,
-                )?
-                .collect::<std::result::Result<Vec<_>, _>>()
-            } else {
-                stmt.query_map(
-                    params![
-                        namespace,
-                        workspace_id,
-                        scope_key,
-                        allow_private as i64,
-                        allow_secret as i64,
-                        limit,
-                        around_value
-                    ],
-                    map_memory_row,
-                )?
-                .collect::<std::result::Result<Vec<_>, _>>()
-            }
+            stmt.query_map(
+                params![
+                    namespace,
+                    workspace_id,
+                    scope_key,
+                    allow_private as i64,
+                    allow_secret as i64,
+                    source_id,
+                    around_enabled,
+                    around_value,
+                    limit
+                ],
+                map_memory_row,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()
         })
     }
 
