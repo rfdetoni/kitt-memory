@@ -83,3 +83,52 @@ fn jobs_are_deduplicated_and_leased() {
     );
     let _ = std::fs::remove_file(db);
 }
+
+
+#[test]
+fn failed_jobs_use_deterministic_retry_backoff() {
+    let db = path();
+    let store = SqliteMemoryStore::open(&db).unwrap();
+    let job = MemoryJob::new("consolidate", "session-2", "r2", "84", "digest-2").unwrap();
+    let enqueued = store.enqueue_memory_job(&job).unwrap();
+    let claimed = store
+        .claim_memory_job("consolidate", "worker-a", 60)
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id, enqueued.id);
+    assert_eq!(claimed.attempt, 1);
+
+    assert!(
+        store
+            .fail_memory_job(&claimed.id, "worker-a", None)
+            .unwrap()
+    );
+    assert!(
+        store
+            .claim_memory_job("consolidate", "worker-b", 60)
+            .unwrap()
+            .is_none()
+    );
+
+    let _ = std::fs::remove_file(db);
+}
+
+#[test]
+fn evidence_tiering_blocks_self_reinforcing_sources() {
+    use kitt_memory_core::{assess_evidence, EvidenceOrigin};
+
+    let user = assess_evidence(EvidenceOrigin::Human, "USER_CORRECTION");
+    assert!(user.learnable);
+    assert_eq!(user.priority, 100);
+
+    for origin in [
+        EvidenceOrigin::Memory,
+        EvidenceOrigin::Skill,
+        EvidenceOrigin::Plugin,
+        EvidenceOrigin::Harness,
+        EvidenceOrigin::System,
+    ] {
+        let assessment = assess_evidence(origin, "ENVIRONMENT_CONTEXT");
+        assert!(!assessment.learnable);
+    }
+}
