@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.0 - 2026-10-01
+
+- Promote progressive memory retrieval to the primary runtime contract through `memory.search`, `memory.timeline` and `memory.get`.
+- Enforce explicit token budgets inside `kitt-memoryd`: search returns bounded snippets/provenance first and get hydrates only selected memory IDs.
+- Preserve namespace/workspace/conversation scope, point-in-time search, sensitivity filters and provenance across progressive retrieval.
+- Keep legacy `memory.recall` available only as an internal/transitional primitive while current K.I.T.T. consumers migrate to Protocol 0.6.
+- Add regression coverage for scoped hydration ordering, secret filtering and provenance-source timeline queries.
+
+
 ## 0.6.1 - 2026-09-30
 
 - Add the public lifecycle evidence ingress for `session.started`, `turn.started`, `tool.completed`, `turn.completed` and `session.ended`.
