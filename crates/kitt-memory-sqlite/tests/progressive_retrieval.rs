@@ -78,19 +78,18 @@ fn get_many_scoped_preserves_requested_order_and_privacy() {
             false,
         )
         .unwrap();
-    assert_eq!(vec![a.clone()], visible.iter().map(|r| r.id.clone()).collect::<Vec<_>>());
+    assert_eq!(
+        vec![a.clone()],
+        visible.iter().map(|r| r.id.clone()).collect::<Vec<_>>()
+    );
 
     let all = store
-        .get_many_scoped(
-            "agent-cli",
-            "ws",
-            None,
-            &[b.clone(), a.clone()],
-            true,
-            true,
-        )
+        .get_many_scoped("agent-cli", "ws", None, &[b.clone(), a.clone()], true, true)
         .unwrap();
-    assert_eq!(vec![b, a], all.iter().map(|r| r.id.clone()).collect::<Vec<_>>());
+    assert_eq!(
+        vec![b, a],
+        all.iter().map(|r| r.id.clone()).collect::<Vec<_>>()
+    );
     cleanup(&path);
 }
 
@@ -156,6 +155,9 @@ fn timeline_filters_by_source_and_conversation_scope() {
             false,
         )
         .unwrap();
-    assert_eq!(vec![conv], rows.iter().map(|r| r.id.clone()).collect::<Vec<_>>());
+    assert_eq!(
+        vec![conv],
+        rows.iter().map(|r| r.id.clone()).collect::<Vec<_>>()
+    );
     cleanup(&path);
 }
