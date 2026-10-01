@@ -226,10 +226,28 @@ fn progressive_trace(
     Ok(trace_id)
 }
 
-fn provenance_for(store: &SqliteMemoryStore, memory_id: &str) -> Result<Vec<MemorySource>, String> {
+fn provenance_for(store: &SqliteMemoryStore, memory_id: &str) -> Result<Vec<Value>, String> {
     store
         .sources_for_memory(memory_id)
-        .map(|rows| rows.into_iter().take(8).collect())
+        .map(|rows| {
+            rows.into_iter()
+                .take(8)
+                .map(|source| {
+                    let uri = source.source_uri.unwrap_or_else(|| {
+                        format!(
+                            "kitt://memory-source/{}/{}",
+                            source.source_kind.trim().to_ascii_lowercase(),
+                            source.source_id
+                        )
+                    });
+                    json!({
+                        "uri": uri,
+                        "revision": source.source_revision,
+                        "digest": source.source_digest
+                    })
+                })
+                .collect()
+        })
         .map_err(|error| error.to_string())
 }
 
