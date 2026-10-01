@@ -15,6 +15,14 @@ K.I.T.T. Memory is the shared persistent memory data plane used across the ecosy
 
 ---
 
+## Memory 0.7.0 — progressive retrieval with memory-owned budgets
+
+Memory 0.7.0 makes progressive retrieval the normal Agent-facing path. `memory.search` returns ranked snippets and provenance under a caller-provided token budget, `memory.get` hydrates only explicitly selected IDs under a second budget, and `memory.timeline` exposes bounded temporal/source-scoped history. The daemon remains responsible for enforcing scope, sensitivity and token pressure; consumers no longer depend on a fixed `limit=8` as the primary context-size control.
+
+The older `memory.recall` endpoint remains a transitional/internal primitive for compatibility during coordinated upgrades, but current ecosystem consumers should use search → get and record consumption receipts against the returned trace IDs.
+
+---
+
 ## Memory 0.6.1 — public lifecycle evidence
 
 Memory 0.6.1 exposes a neutral lifecycle ingress for external K.I.T.T. clients: `session.started`, `turn.started`, `tool.completed`, `turn.completed` and `session.ended`. These hooks do not write semantic memories directly. They enqueue the same durable, idempotent `MemoryJob` pipeline used by internal memory work, after validating the event class and reducing source identity/revision to anonymized hashes.
@@ -149,7 +157,7 @@ let baseline = store.baseline(&kitt_memory_core::BaselineQuery {
 
 ## Runtime service
 
-`kitt-memoryd` is the only durable memory authority used by the current K.I.T.T. ecosystem. The management plane includes status/pin/archive/touch, Dreaming transactions, corrections, concepts, typed concept links, recall-consumption receipts, durable background jobs and privacy-safe lifecycle evidence ingress. Historical Agent-local memory import is intentionally not supported by 0.6.x.
+`kitt-memoryd` is the only durable memory authority used by the current K.I.T.T. ecosystem. Its normal read plane is progressive (`memory.search` → optional `memory.timeline` → `memory.get`) with memory-owned token budgets; its management plane includes status/pin/archive/touch, Dreaming transactions, corrections, concepts, typed concept links, consumption receipts, durable background jobs and privacy-safe lifecycle evidence ingress. Historical Agent-local memory import is intentionally unsupported.
 
 ---
 
@@ -261,6 +269,6 @@ The schema registry lets a product or plugin define specialized memory shapes, r
 
 `kitt-memoryd` is now the canonical runtime owner of durable KITT memory. It listens on loopback only (default `127.0.0.1:41829`), stores its token under the KITT memory config directory, and stores SQLite state under the KITT memory data directory.
 
-The hot path exposes protocol-v1 `memory.remember`, `memory.recall` and `memory.forget`. Recall responses include a durable trace identity so consumers can record presentation/reference/action receipts without conflating retrieval with actual use. The bounded `memory.manage` control plane owns status changes, pin/archive/touch operations, dream-run history, atomic dream commits, corrections, concepts, typed concept links, consumption receipts, leased background jobs and maintenance. Agent-side code may propose work, but only kitt-memory persists semantic memory state and provenance.
+The hot path exposes protocol-v1 `memory.remember`, `memory.search`, `memory.timeline`, `memory.get` and `memory.forget`; `memory.recall` remains a transitional primitive. Recall responses include a durable trace identity so consumers can record presentation/reference/action receipts without conflating retrieval with actual use. The bounded `memory.manage` control plane owns status changes, pin/archive/touch operations, dream-run history, atomic dream commits, corrections, concepts, typed concept links, consumption receipts, leased background jobs and maintenance. Agent-side code may propose work, but only kitt-memory persists semantic memory state and provenance.
 
 Environment overrides: `KITT_MEMORY_ADDR`, `KITT_MEMORY_CONFIG_DIR`, `KITT_MEMORY_DATA_DIR`, `KITT_MEMORY_TOKEN_PATH`, `KITT_MEMORY_DB`.
