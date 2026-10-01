@@ -1,8 +1,8 @@
 use kitt_memory_core::{
-    DreamRunRecord, KnowledgeRelation, KnowledgeStore, MemoryConsumptionReceipt, MemoryJob,
-    MemoryKind, MemoryRecord, MemoryScope, MemorySource, MemoryStatus, MemoryStore, NewConcept,
-    NewCorrection, NewMemory, RecallQuery, RecallTrace, SemanticMemoryStore, Sensitivity,
-    hash_normalized, now_epoch,
+    DreamRunRecord, EvidenceOrigin, KnowledgeRelation, KnowledgeStore, MemoryConsumptionReceipt,
+    MemoryJob, MemoryKind, MemoryRecord, MemoryScope, MemorySource, MemoryStatus, MemoryStore,
+    NewConcept, NewCorrection, NewMemory, RecallQuery, RecallTrace, SemanticMemoryStore,
+    Sensitivity, assess_evidence, hash_normalized, now_epoch,
 };
 use kitt_memory_sqlite::SqliteMemoryStore;
 use serde::{Deserialize, Serialize};
@@ -825,9 +825,20 @@ fn manage(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
                 .unwrap_or("external")
                 .trim()
                 .to_ascii_lowercase();
-            if source_kind.is_empty()
-                || source_kind.contains("memory")
-                || source_kind.contains("recall")
+            if source_kind.is_empty() {
+                return Err("lifecycle source_kind is required".into());
+            }
+            let restricted_origin = match source_kind.as_str() {
+                "memory" | "recall" => Some(EvidenceOrigin::Memory),
+                "skill" => Some(EvidenceOrigin::Skill),
+                "plugin" => Some(EvidenceOrigin::Plugin),
+                "harness" => Some(EvidenceOrigin::Harness),
+                "system" => Some(EvidenceOrigin::System),
+                _ => None,
+            };
+            if restricted_origin
+                .map(|origin| !assess_evidence(origin, "ENVIRONMENT_CONTEXT").learnable)
+                .unwrap_or(false)
             {
                 return Err("lifecycle source_kind is not eligible evidence".into());
             }
@@ -896,14 +907,44 @@ fn manage(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
             Ok(json!({"changed": changed}))
         }
         "job.fail" => {
-            let changed = store
-                .fail_memory_job(
-                    as_str(&args, "id")?,
-                    as_str(&args, "owner")?,
-                    args.get("retry_after_seconds").and_then(Value::as_i64),
-                )
-                .map_err(|e| e.to_string())?;
-            Ok(json!({"changed": changed}))
+            let terminal = args
+                .get("terminal")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let changed = if terminal {
+                store
+                    .terminal_memory_job_failure(
+                        as_str(&args, "id")?,
+                        as_str(&args, "owner")?,
+                    )
+                    .map_err(|e| e.to_string())?
+            } else {
+                store
+                    .fail_memory_job(
+                        as_str(&args, "id")?,
+                        as_str(&args, "owner")?,
+                        args.get("retry_after_seconds").and_then(Value::as_i64),
+                    )
+                    .map_err(|e| e.to_string())?
+            };
+            Ok(json!({"changed": changed, "terminal": terminal}))
+        }
+        "evidence.assess" => {
+            let origin = match as_str(&args, "origin")?.trim().to_ascii_uppercase().as_str() {
+                "HUMAN" => EvidenceOrigin::Human,
+                "ASSISTANT" => EvidenceOrigin::Assistant,
+                "SUBAGENT" => EvidenceOrigin::Subagent,
+                "TOOL" => EvidenceOrigin::Tool,
+                "REPOSITORY" => EvidenceOrigin::Repository,
+                "MEMORY" => EvidenceOrigin::Memory,
+                "SKILL" => EvidenceOrigin::Skill,
+                "PLUGIN" => EvidenceOrigin::Plugin,
+                "HARNESS" => EvidenceOrigin::Harness,
+                "SYSTEM" => EvidenceOrigin::System,
+                _ => return Err("unsupported evidence origin".into()),
+            };
+            let assessment = assess_evidence(origin, as_str(&args, "class")?);
+            Ok(serde_json::to_value(assessment).map_err(|e| e.to_string())?)
         }
         "maintenance" => {
             let namespace = args
