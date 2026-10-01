@@ -79,6 +79,142 @@ impl SqliteMemoryStore {
         })
     }
 
+    pub fn get_many_scoped(
+        &self,
+        namespace: &str,
+        workspace_id: &str,
+        scope_key: Option<&str>,
+        ids: &[String],
+        allow_private: bool,
+        allow_secret: bool,
+    ) -> Result<Vec<MemoryRecord>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let wanted = ids
+            .iter()
+            .filter(|id| !id.trim().is_empty())
+            .take(128)
+            .cloned()
+            .collect::<Vec<_>>();
+        if wanted.is_empty() {
+            return Ok(Vec::new());
+        }
+        let scope_key = scope_key.unwrap_or("").to_string();
+        self.with_conn(|conn| {
+            let mut out = Vec::with_capacity(wanted.len());
+            let sql = format!(
+                "SELECT {MEMORY_COLUMNS} FROM memories m
+                 WHERE m.id=?1 AND m.namespace=?2
+                   AND (m.scope='global'
+                     OR (m.workspace_id=?3 AND m.scope='workspace')
+                     OR (m.workspace_id=?3 AND m.scope='conversation' AND m.scope_key=?4))
+                   AND m.status='ACTIVE'
+                   AND m.sensitivity<>'ephemeral'
+                   AND (m.sensitivity<>'private' OR ?5=1)
+                   AND (m.sensitivity<>'secret' OR ?6=1)
+                 LIMIT 1"
+            );
+            for id in &wanted {
+                if let Some(record) = conn
+                    .query_row(
+                        &sql,
+                        params![
+                            id,
+                            namespace,
+                            workspace_id,
+                            scope_key,
+                            allow_private as i64,
+                            allow_secret as i64
+                        ],
+                        map_memory_row,
+                    )
+                    .optional()?
+                {
+                    out.push(record);
+                }
+            }
+            Ok(out)
+        })
+    }
+
+    pub fn timeline_memories(
+        &self,
+        namespace: &str,
+        workspace_id: &str,
+        source_id: Option<&str>,
+        scope_key: Option<&str>,
+        around: Option<i64>,
+        limit: usize,
+        allow_private: bool,
+        allow_secret: bool,
+    ) -> Result<Vec<MemoryRecord>> {
+        let limit = limit.clamp(1, 128) as i64;
+        let scope_key = scope_key.unwrap_or("");
+        let source_id = source_id.map(str::trim).filter(|value| !value.is_empty());
+        let around_value = around.unwrap_or_else(now_epoch);
+        self.with_conn(|conn| {
+            let source_clause = if source_id.is_some() {
+                "AND EXISTS (
+                    SELECT 1 FROM memory_sources s
+                    WHERE s.memory_id=m.id AND s.source_id=?8
+                )"
+            } else {
+                ""
+            };
+            let ordering = if around.is_some() {
+                "ORDER BY ABS(m.updated_at-?7) ASC,m.updated_at DESC,m.id ASC"
+            } else {
+                "ORDER BY m.updated_at DESC,m.id ASC"
+            };
+            let sql = format!(
+                "SELECT {MEMORY_COLUMNS} FROM memories m
+                 WHERE m.namespace=?1
+                   AND (m.scope='global'
+                     OR (m.workspace_id=?2 AND m.scope='workspace')
+                     OR (m.workspace_id=?2 AND m.scope='conversation' AND m.scope_key=?3))
+                   AND m.status='ACTIVE'
+                   AND m.sensitivity<>'ephemeral'
+                   AND (m.sensitivity<>'private' OR ?4=1)
+                   AND (m.sensitivity<>'secret' OR ?5=1)
+                   {source_clause}
+                 {ordering}
+                 LIMIT ?6"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            if let Some(source_id) = source_id {
+                stmt.query_map(
+                    params![
+                        namespace,
+                        workspace_id,
+                        scope_key,
+                        allow_private as i64,
+                        allow_secret as i64,
+                        limit,
+                        around_value,
+                        source_id
+                    ],
+                    map_memory_row,
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()
+            } else {
+                stmt.query_map(
+                    params![
+                        namespace,
+                        workspace_id,
+                        scope_key,
+                        allow_private as i64,
+                        allow_secret as i64,
+                        limit,
+                        around_value
+                    ],
+                    map_memory_row,
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()
+            }
+        })
+    }
+
     pub fn set_pinned(&self, id: &str, pinned: bool) -> Result<bool> {
         let conn = self.writer_conn()?;
         Ok(conn
