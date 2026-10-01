@@ -108,10 +108,7 @@ impl SqliteMemoryStore {
     }
 
     /// Return memories in temporal order, optionally narrowed to one provenance source.
-    pub fn timeline_memories(
-        &self,
-        query: &TimelineMemoryQuery<'_>,
-    ) -> Result<Vec<MemoryRecord>> {
+    pub fn timeline_memories(&self, query: &TimelineMemoryQuery<'_>) -> Result<Vec<MemoryRecord>> {
         if query.limit == 0 {
             return Ok(Vec::new());
         }
@@ -142,7 +139,7 @@ impl SqliteMemoryStore {
              ORDER BY {order}
              LIMIT ?"
         );
-        let mut values = vec![
+        let mut values: Vec<rusqlite::types::Value> = vec![
             query.namespace.to_string().into(),
             query.workspace_id.to_string().into(),
             query.workspace_id.to_string().into(),
