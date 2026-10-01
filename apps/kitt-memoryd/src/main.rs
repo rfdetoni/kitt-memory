@@ -4,7 +4,7 @@ use kitt_memory_core::{
     NewConcept, NewCorrection, NewMemory, RecallQuery, RecallTrace, SemanticMemoryStore,
     Sensitivity, assess_evidence, hash_normalized, now_epoch,
 };
-use kitt_memory_sqlite::SqliteMemoryStore;
+use kitt_memory_sqlite::{SqliteMemoryStore, TimelineMemoryQuery};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -483,16 +483,16 @@ fn progressive_timeline(store: &SqliteMemoryStore, payload: &Value) -> Result<Va
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let rows = store
-        .timeline_memories(
-            &namespace,
-            &workspace_id,
+        .timeline_memories(&TimelineMemoryQuery {
+            namespace: &namespace,
+            workspace_id: &workspace_id,
             source_id,
             scope_key,
             around,
             limit,
             allow_private,
             allow_secret,
-        )
+        })
         .map_err(|error| error.to_string())?;
     let candidates = rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
     let mut hits = Vec::new();
