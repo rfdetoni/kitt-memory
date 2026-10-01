@@ -607,7 +607,6 @@ fn distinct_kinds_and_scopes_do_not_exact_merge() {
     let _ = std::fs::remove_file(&db);
 }
 
-
 #[test]
 fn progressive_hydration_and_timeline_preserve_scope_and_provenance() {
     let db = temp_db_path("progressive");
@@ -684,7 +683,10 @@ fn progressive_hydration_and_timeline_preserve_scope_and_provenance() {
     assert_eq!(timeline[0].id, record.id);
     let provenance = store.sources_for_memory(&record.id).unwrap();
     assert_eq!(provenance.len(), 1);
-    assert_eq!(provenance[0].source_uri.as_deref(), Some("kitt://repo/docs/architecture"));
+    assert_eq!(
+        provenance[0].source_uri.as_deref(),
+        Some("kitt://repo/docs/architecture")
+    );
 
     let _ = std::fs::remove_file(&db);
 }
