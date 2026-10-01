@@ -74,7 +74,12 @@ impl SqliteMemoryStore {
         values.push(scope_key.unwrap_or("").to_string().into());
         values.push((allow_private as i64).into());
         values.push((allow_secret as i64).into());
-        values.extend(bounded_ids.iter().cloned().map(rusqlite::types::Value::from));
+        values.extend(
+            bounded_ids
+                .iter()
+                .cloned()
+                .map(rusqlite::types::Value::from),
+        );
         let rows = self.with_conn(|conn| {
             let mut stmt = conn.prepare(&sql)?;
             stmt.query_map(rusqlite::params_from_iter(values), map_memory_row)?
