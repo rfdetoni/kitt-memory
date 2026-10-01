@@ -606,3 +606,85 @@ fn distinct_kinds_and_scopes_do_not_exact_merge() {
     assert_ne!(a.id, b.id);
     let _ = std::fs::remove_file(&db);
 }
+
+
+#[test]
+fn progressive_hydration_and_timeline_preserve_scope_and_provenance() {
+    let db = temp_db_path("progressive");
+    let store = SqliteMemoryStore::open(&db).unwrap();
+    let record = store
+        .remember(NewMemory {
+            namespace: "agent-cli".into(),
+            workspace_id: "ws-progressive".into(),
+            kind: MemoryKind::ArchitectureDecision,
+            content: "The durable event ledger is the execution source of truth.".into(),
+            sensitivity: Sensitivity::Private,
+            scope: MemoryScope::Conversation,
+            scope_key: Some("conv-a".into()),
+            importance: 0.95,
+            confidence: 1.0,
+            pinned: true,
+            ttl_seconds: None,
+            metadata_json: "{}".into(),
+        })
+        .unwrap();
+    store
+        .record_source(NewMemorySource {
+            memory_id: record.id.clone(),
+            source_kind: "repository".into(),
+            source_id: "session-42".into(),
+            source_uri: Some("kitt://repo/docs/architecture".into()),
+            source_digest: Some("abc123".into()),
+            relationship: "supports".into(),
+            source_revision: Some("r1".into()),
+            observed_at: None,
+            valid_from: None,
+            valid_until: None,
+        })
+        .unwrap();
+
+    let wrong_scope = store
+        .get_many_scoped(
+            "agent-cli",
+            "ws-progressive",
+            Some("conv-b"),
+            std::slice::from_ref(&record.id),
+            true,
+            false,
+        )
+        .unwrap();
+    assert!(wrong_scope.is_empty());
+
+    let hydrated = store
+        .get_many_scoped(
+            "agent-cli",
+            "ws-progressive",
+            Some("conv-a"),
+            std::slice::from_ref(&record.id),
+            true,
+            false,
+        )
+        .unwrap();
+    assert_eq!(hydrated.len(), 1);
+    assert_eq!(hydrated[0].id, record.id);
+
+    let timeline = store
+        .timeline_memories(
+            "agent-cli",
+            "ws-progressive",
+            Some("session-42"),
+            Some("conv-a"),
+            None,
+            10,
+            true,
+            false,
+        )
+        .unwrap();
+    assert_eq!(timeline.len(), 1);
+    assert_eq!(timeline[0].id, record.id);
+    let provenance = store.sources_for_memory(&record.id).unwrap();
+    assert_eq!(provenance.len(), 1);
+    assert_eq!(provenance[0].source_uri.as_deref(), Some("kitt://repo/docs/architecture"));
+
+    let _ = std::fs::remove_file(&db);
+}
