@@ -184,34 +184,42 @@ fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
     value[..end].to_string()
 }
 
-fn progressive_trace(
-    store: &SqliteMemoryStore,
-    namespace: &str,
-    workspace_id: &str,
-    query: &str,
+struct ProgressiveTraceInput<'a> {
+    namespace: &'a str,
+    workspace_id: &'a str,
+    query: &'a str,
     scope: Value,
-    candidates: &[String],
-    selected: &[String],
+    candidates: &'a [String],
+    selected: &'a [String],
     token_cost: u64,
     elapsed: Instant,
+}
+
+fn progressive_trace(
+    store: &SqliteMemoryStore,
+    input: ProgressiveTraceInput<'_>,
 ) -> Result<String, String> {
     let trace_id = format!("recall_{}", Uuid::new_v4().simple());
-    let candidates_json = serde_json::to_string(candidates).unwrap_or_else(|_| "[]".into());
-    let selected_json = serde_json::to_string(selected).unwrap_or_else(|_| "[]".into());
+    let candidates_json =
+        serde_json::to_string(input.candidates).unwrap_or_else(|_| "[]".into());
+    let selected_json =
+        serde_json::to_string(input.selected).unwrap_or_else(|_| "[]".into());
     let context_hash = hash_normalized(&format!(
-        "{namespace}|{workspace_id}|{query}|{selected_json}"
+        "{}|{}|{}|{selected_json}",
+        input.namespace, input.workspace_id, input.query
     ));
     let trace = RecallTrace {
         id: trace_id.clone(),
-        namespace: namespace.to_string(),
-        workspace_id: workspace_id.to_string(),
-        query: query.to_string(),
-        planned_scopes_json: serde_json::to_string(&scope).unwrap_or_else(|_| "{}".into()),
+        namespace: input.namespace.to_string(),
+        workspace_id: input.workspace_id.to_string(),
+        query: input.query.to_string(),
+        planned_scopes_json: serde_json::to_string(&input.scope)
+            .unwrap_or_else(|_| "{}".into()),
         candidates_json,
         selected_json,
-        token_cost,
+        token_cost: input.token_cost,
         semantic_fallback: false,
-        elapsed_us: elapsed.elapsed().as_micros().min(u64::MAX as u128) as u64,
+        elapsed_us: input.elapsed.elapsed().as_micros().min(u64::MAX as u128) as u64,
         context_hash,
         created_at: now_epoch(),
     };
@@ -339,22 +347,24 @@ fn progressive_search(store: &SqliteMemoryStore, payload: &Value) -> Result<Valu
     }
     let trace_id = progressive_trace(
         store,
-        &namespace,
-        &workspace_id,
-        &query_text,
-        json!({
-            "scope_key": scope_key,
-            "as_of": as_of,
-            "allow_private": allow_private,
-            "allow_secret": allow_secret,
-            "token_budget": token_budget,
-            "max_results": max_results,
-            "mode": "search"
-        }),
-        &candidates,
-        &selected,
-        consumed,
-        started,
+        ProgressiveTraceInput {
+            namespace: &namespace,
+            workspace_id: &workspace_id,
+            query: &query_text,
+            scope: json!({
+                "scope_key": scope_key,
+                "as_of": as_of,
+                "allow_private": allow_private,
+                "allow_secret": allow_secret,
+                "token_budget": token_budget,
+                "max_results": max_results,
+                "mode": "search"
+            }),
+            candidates: &candidates,
+            selected: &selected,
+            token_cost: consumed,
+            elapsed: started,
+        },
     )?;
     Ok(json!({
         "recall_trace_id": trace_id,
@@ -429,20 +439,22 @@ fn progressive_get(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, 
     }
     let trace_id = progressive_trace(
         store,
-        &namespace,
-        &workspace_id,
-        "memory.get",
-        json!({
-            "scope_key": scope_key,
-            "allow_private": allow_private,
-            "allow_secret": allow_secret,
-            "token_budget": token_budget,
-            "mode": "get"
-        }),
-        &candidates,
-        &selected,
-        consumed,
-        started,
+        ProgressiveTraceInput {
+            namespace: &namespace,
+            workspace_id: &workspace_id,
+            query: "memory.get",
+            scope: json!({
+                "scope_key": scope_key,
+                "allow_private": allow_private,
+                "allow_secret": allow_secret,
+                "token_budget": token_budget,
+                "mode": "get"
+            }),
+            candidates: &candidates,
+            selected: &selected,
+            token_cost: consumed,
+            elapsed: started,
+        },
     )?;
     Ok(json!({
         "recall_trace_id": trace_id,
@@ -532,20 +544,22 @@ fn progressive_timeline(store: &SqliteMemoryStore, payload: &Value) -> Result<Va
     }
     let trace_id = progressive_trace(
         store,
-        &namespace,
-        &workspace_id,
-        source_id.unwrap_or("memory.timeline"),
-        json!({
-            "source_id": source_id,
-            "scope_key": scope_key,
-            "around": around,
-            "token_budget": token_budget,
-            "mode": "timeline"
-        }),
-        &candidates,
-        &selected,
-        consumed,
-        started,
+        ProgressiveTraceInput {
+            namespace: &namespace,
+            workspace_id: &workspace_id,
+            query: source_id.unwrap_or("memory.timeline"),
+            scope: json!({
+                "source_id": source_id,
+                "scope_key": scope_key,
+                "around": around,
+                "token_budget": token_budget,
+                "mode": "timeline"
+            }),
+            candidates: &candidates,
+            selected: &selected,
+            token_cost: consumed,
+            elapsed: started,
+        },
     )?;
     Ok(json!({
         "recall_trace_id": trace_id,
