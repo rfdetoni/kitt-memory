@@ -981,6 +981,18 @@ fn handle(store: &SqliteMemoryStore, frame: Frame, token: &str) -> ResponseEnvel
                 Err(message) => error(Some(id), "memory_error", message),
             }
         }
+        "memory.search.request" => match progressive_search(store, &frame.envelope.payload) {
+            Ok(value) => response("memory.search.response", id, value),
+            Err(message) => error(Some(id), "memory_error", message),
+        },
+        "memory.timeline.request" => match progressive_timeline(store, &frame.envelope.payload) {
+            Ok(value) => response("memory.timeline.response", id, value),
+            Err(message) => error(Some(id), "memory_error", message),
+        },
+        "memory.get.request" => match progressive_get(store, &frame.envelope.payload) {
+            Ok(value) => response("memory.get.response", id, value),
+            Err(message) => error(Some(id), "memory_error", message),
+        },
         "memory.recall.request" => {
             let p = &frame.envelope.payload;
             let started = Instant::now();
