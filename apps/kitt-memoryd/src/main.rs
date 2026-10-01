@@ -169,7 +169,6 @@ fn as_str<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("missing {key}"))
 }
 
-
 fn token_estimate(text: &str) -> u64 {
     text.len().div_ceil(4) as u64
 }
@@ -197,10 +196,8 @@ fn progressive_trace(
     elapsed: Instant,
 ) -> Result<String, String> {
     let trace_id = format!("recall_{}", Uuid::new_v4().simple());
-    let candidates_json =
-        serde_json::to_string(candidates).unwrap_or_else(|_| "[]".into());
-    let selected_json =
-        serde_json::to_string(selected).unwrap_or_else(|_| "[]".into());
+    let candidates_json = serde_json::to_string(candidates).unwrap_or_else(|_| "[]".into());
+    let selected_json = serde_json::to_string(selected).unwrap_or_else(|_| "[]".into());
     let context_hash = hash_normalized(&format!(
         "{namespace}|{workspace_id}|{query}|{selected_json}"
     ));
@@ -209,8 +206,7 @@ fn progressive_trace(
         namespace: namespace.to_string(),
         workspace_id: workspace_id.to_string(),
         query: query.to_string(),
-        planned_scopes_json: serde_json::to_string(&scope)
-            .unwrap_or_else(|_| "{}".into()),
+        planned_scopes_json: serde_json::to_string(&scope).unwrap_or_else(|_| "{}".into()),
         candidates_json,
         selected_json,
         token_cost,
@@ -310,9 +306,8 @@ fn progressive_search(store: &SqliteMemoryStore, payload: &Value) -> Result<Valu
             break;
         }
         let provenance = provenance_for(store, &record.id)?;
-        let provenance_cost = token_estimate(
-            &serde_json::to_string(&provenance).unwrap_or_default(),
-        );
+        let provenance_cost =
+            token_estimate(&serde_json::to_string(&provenance).unwrap_or_default());
         let remaining = token_budget.saturating_sub(consumed + provenance_cost);
         if remaining == 0 {
             break;
@@ -378,9 +373,7 @@ fn progressive_get(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, 
         .trim()
         .to_string();
     let workspace_id = as_str(payload, "workspace_id")?.trim().to_string();
-    let scope_key = payload
-        .get("scope_key")
-        .and_then(Value::as_str);
+    let scope_key = payload.get("scope_key").and_then(Value::as_str);
     let ids = payload
         .get("ids")
         .and_then(Value::as_array)
@@ -513,8 +506,7 @@ fn progressive_timeline(store: &SqliteMemoryStore, payload: &Value) -> Result<Va
         let remaining = token_budget.saturating_sub(consumed);
         let snippet = truncate_utf8_bytes(
             &record.content,
-            usize::try_from(remaining.min(192).saturating_mul(4))
-                .unwrap_or(usize::MAX),
+            usize::try_from(remaining.min(192).saturating_mul(4)).unwrap_or(usize::MAX),
         );
         let cost = token_estimate(&snippet).saturating_add(token_estimate(
             &serde_json::to_string(&provenance).unwrap_or_default(),
@@ -912,10 +904,7 @@ fn manage(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
                 .unwrap_or(false);
             let changed = if terminal {
                 store
-                    .terminal_memory_job_failure(
-                        as_str(&args, "id")?,
-                        as_str(&args, "owner")?,
-                    )
+                    .terminal_memory_job_failure(as_str(&args, "id")?, as_str(&args, "owner")?)
                     .map_err(|e| e.to_string())?
             } else {
                 store
@@ -929,7 +918,11 @@ fn manage(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
             Ok(json!({"changed": changed, "terminal": terminal}))
         }
         "evidence.assess" => {
-            let origin = match as_str(&args, "origin")?.trim().to_ascii_uppercase().as_str() {
+            let origin = match as_str(&args, "origin")?
+                .trim()
+                .to_ascii_uppercase()
+                .as_str()
+            {
                 "HUMAN" => EvidenceOrigin::Human,
                 "ASSISTANT" => EvidenceOrigin::Assistant,
                 "SUBAGENT" => EvidenceOrigin::Subagent,
