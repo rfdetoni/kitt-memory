@@ -200,10 +200,8 @@ fn progressive_trace(
     input: ProgressiveTraceInput<'_>,
 ) -> Result<String, String> {
     let trace_id = format!("recall_{}", Uuid::new_v4().simple());
-    let candidates_json =
-        serde_json::to_string(input.candidates).unwrap_or_else(|_| "[]".into());
-    let selected_json =
-        serde_json::to_string(input.selected).unwrap_or_else(|_| "[]".into());
+    let candidates_json = serde_json::to_string(input.candidates).unwrap_or_else(|_| "[]".into());
+    let selected_json = serde_json::to_string(input.selected).unwrap_or_else(|_| "[]".into());
     let context_hash = hash_normalized(&format!(
         "{}|{}|{}|{selected_json}",
         input.namespace, input.workspace_id, input.query
@@ -213,8 +211,7 @@ fn progressive_trace(
         namespace: input.namespace.to_string(),
         workspace_id: input.workspace_id.to_string(),
         query: input.query.to_string(),
-        planned_scopes_json: serde_json::to_string(&input.scope)
-            .unwrap_or_else(|_| "{}".into()),
+        planned_scopes_json: serde_json::to_string(&input.scope).unwrap_or_else(|_| "{}".into()),
         candidates_json,
         selected_json,
         token_cost: input.token_cost,
