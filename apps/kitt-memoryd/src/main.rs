@@ -169,6 +169,383 @@ fn as_str<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("missing {key}"))
 }
 
+
+fn token_estimate(text: &str) -> u64 {
+    text.len().div_ceil(4) as u64
+}
+
+fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
+}
+
+fn progressive_trace(
+    store: &SqliteMemoryStore,
+    *,
+    namespace: &str,
+    workspace_id: &str,
+    query: &str,
+    scope: Value,
+    candidates: &[String],
+    selected: &[String],
+    token_cost: u64,
+    elapsed: Instant,
+) -> Result<String, String> {
+    let trace_id = format!("recall_{}", Uuid::new_v4().simple());
+    let candidates_json =
+        serde_json::to_string(candidates).unwrap_or_else(|_| "[]".into());
+    let selected_json =
+        serde_json::to_string(selected).unwrap_or_else(|_| "[]".into());
+    let context_hash = hash_normalized(&format!(
+        "{namespace}|{workspace_id}|{query}|{selected_json}"
+    ));
+    let trace = RecallTrace {
+        id: trace_id.clone(),
+        namespace: namespace.to_string(),
+        workspace_id: workspace_id.to_string(),
+        query: query.to_string(),
+        planned_scopes_json: serde_json::to_string(&scope)
+            .unwrap_or_else(|_| "{}".into()),
+        candidates_json,
+        selected_json,
+        token_cost,
+        semantic_fallback: false,
+        elapsed_us: elapsed.elapsed().as_micros().min(u64::MAX as u128) as u64,
+        context_hash,
+        created_at: now_epoch(),
+    };
+    store
+        .record_recall_trace(&trace)
+        .map_err(|error| error.to_string())?;
+    Ok(trace_id)
+}
+
+fn provenance_for(store: &SqliteMemoryStore, memory_id: &str) -> Result<Vec<MemorySource>, String> {
+    store
+        .sources_for_memory(memory_id)
+        .map(|rows| rows.into_iter().take(8).collect())
+        .map_err(|error| error.to_string())
+}
+
+fn progressive_search(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
+    let started = Instant::now();
+    let namespace = payload
+        .get("namespace")
+        .and_then(Value::as_str)
+        .unwrap_or("agent-cli")
+        .trim()
+        .to_string();
+    let workspace_id = as_str(payload, "workspace_id")?.trim().to_string();
+    if workspace_id.is_empty() {
+        return Err("missing workspace_id".into());
+    }
+    let scope_key = payload
+        .get("scope_key")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let query_text = payload
+        .get("query")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let max_results = payload
+        .get("max_results")
+        .and_then(Value::as_u64)
+        .unwrap_or(24)
+        .clamp(1, 128) as usize;
+    let token_budget = payload
+        .get("token_budget")
+        .and_then(Value::as_u64)
+        .unwrap_or(1200)
+        .min(65_536);
+    let as_of = payload.get("as_of").and_then(Value::as_i64);
+    let allow_private = payload
+        .get("allow_private")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let allow_secret = payload
+        .get("allow_secret")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let query = RecallQuery {
+        namespace: namespace.clone(),
+        workspace_id: workspace_id.clone(),
+        scope_key: scope_key.clone(),
+        text: query_text.clone(),
+        limit: max_results,
+        as_of,
+        allow_private,
+        allow_secret,
+    };
+    let records = store.recall(&query).map_err(|error| error.to_string())?;
+    let candidates = records.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
+    let mut consumed = 0_u64;
+    let mut hits = Vec::new();
+    let mut selected = Vec::new();
+    for record in &records {
+        if consumed >= token_budget {
+            break;
+        }
+        let provenance = provenance_for(store, &record.id)?;
+        let provenance_cost = token_estimate(
+            &serde_json::to_string(&provenance).unwrap_or_default(),
+        );
+        let remaining = token_budget.saturating_sub(consumed + provenance_cost);
+        if remaining == 0 {
+            break;
+        }
+        let desired = remaining.min(192);
+        let snippet = truncate_utf8_bytes(
+            &record.content,
+            usize::try_from(desired.saturating_mul(4)).unwrap_or(usize::MAX),
+        );
+        let snippet_tokens = token_estimate(&snippet);
+        let cost = snippet_tokens.saturating_add(provenance_cost);
+        if cost == 0 || consumed.saturating_add(cost) > token_budget {
+            break;
+        }
+        consumed = consumed.saturating_add(cost);
+        selected.push(record.id.clone());
+        hits.push(json!({
+            "id": record.id,
+            "kind": record.kind.as_db().to_ascii_lowercase(),
+            "snippet": snippet,
+            "sensitivity": record.sensitivity.as_db(),
+            "scope": record.scope.as_db(),
+            "scope_key": record.scope_key,
+            "importance": record.importance,
+            "confidence": record.confidence,
+            "token_estimate": snippet_tokens,
+            "provenance": provenance,
+        }));
+    }
+    let trace_id = progressive_trace(
+        store,
+        namespace: &namespace,
+        workspace_id: &workspace_id,
+        query: &query_text,
+        scope: json!({
+            "scope_key": scope_key,
+            "as_of": as_of,
+            "allow_private": allow_private,
+            "allow_secret": allow_secret,
+            "token_budget": token_budget,
+            "max_results": max_results,
+            "mode": "search"
+        }),
+        candidates: &candidates,
+        selected: &selected,
+        token_cost: consumed,
+        elapsed: started,
+    )?;
+    Ok(json!({
+        "recall_trace_id": trace_id,
+        "hits": hits,
+        "consumed_tokens": consumed,
+        "has_more": selected.len() < candidates.len()
+    }))
+}
+
+fn progressive_get(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
+    let started = Instant::now();
+    let namespace = payload
+        .get("namespace")
+        .and_then(Value::as_str)
+        .unwrap_or("agent-cli")
+        .trim()
+        .to_string();
+    let workspace_id = as_str(payload, "workspace_id")?.trim().to_string();
+    let scope_key = payload
+        .get("scope_key")
+        .and_then(Value::as_str);
+    let ids = payload
+        .get("ids")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "missing ids".to_string())?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .take(128)
+        .collect::<Vec<_>>();
+    let token_budget = payload
+        .get("token_budget")
+        .and_then(Value::as_u64)
+        .unwrap_or(2400)
+        .min(65_536);
+    let allow_private = payload
+        .get("allow_private")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let allow_secret = payload
+        .get("allow_secret")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let rows = store
+        .get_many_scoped(
+            &namespace,
+            &workspace_id,
+            scope_key,
+            &ids,
+            allow_private,
+            allow_secret,
+        )
+        .map_err(|error| error.to_string())?;
+    let candidates = rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
+    let mut records = Vec::new();
+    let mut selected = Vec::new();
+    let mut truncated_ids = Vec::new();
+    let mut consumed = 0_u64;
+    for record in rows {
+        let provenance = provenance_for(store, &record.id)?;
+        let cost = token_estimate(&record.content).saturating_add(token_estimate(
+            &serde_json::to_string(&provenance).unwrap_or_default(),
+        ));
+        if consumed.saturating_add(cost) > token_budget {
+            truncated_ids.push(record.id.clone());
+            continue;
+        }
+        consumed = consumed.saturating_add(cost);
+        selected.push(record.id.clone());
+        records.push(json!({
+            "record": record,
+            "provenance": provenance
+        }));
+    }
+    let trace_id = progressive_trace(
+        store,
+        namespace: &namespace,
+        workspace_id: &workspace_id,
+        query: "memory.get",
+        scope: json!({
+            "scope_key": scope_key,
+            "allow_private": allow_private,
+            "allow_secret": allow_secret,
+            "token_budget": token_budget,
+            "mode": "get"
+        }),
+        candidates: &candidates,
+        selected: &selected,
+        token_cost: consumed,
+        elapsed: started,
+    )?;
+    Ok(json!({
+        "recall_trace_id": trace_id,
+        "records": records,
+        "consumed_tokens": consumed,
+        "truncated_ids": truncated_ids
+    }))
+}
+
+fn progressive_timeline(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
+    let started = Instant::now();
+    let namespace = payload
+        .get("namespace")
+        .and_then(Value::as_str)
+        .unwrap_or("agent-cli")
+        .trim()
+        .to_string();
+    let workspace_id = as_str(payload, "workspace_id")?.trim().to_string();
+    let source_id = payload.get("source_id").and_then(Value::as_str);
+    let scope_key = payload.get("scope_key").and_then(Value::as_str);
+    let around = payload.get("around").and_then(Value::as_i64);
+    let limit = payload
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(24)
+        .clamp(1, 128) as usize;
+    let token_budget = payload
+        .get("token_budget")
+        .and_then(Value::as_u64)
+        .unwrap_or(1200)
+        .min(65_536);
+    let allow_private = payload
+        .get("allow_private")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let allow_secret = payload
+        .get("allow_secret")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let rows = store
+        .timeline_memories(
+            &namespace,
+            &workspace_id,
+            source_id,
+            scope_key,
+            around,
+            limit,
+            allow_private,
+            allow_secret,
+        )
+        .map_err(|error| error.to_string())?;
+    let candidates = rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
+    let mut hits = Vec::new();
+    let mut selected = Vec::new();
+    let mut consumed = 0_u64;
+    for record in &rows {
+        if consumed >= token_budget {
+            break;
+        }
+        let provenance = provenance_for(store, &record.id)?;
+        let remaining = token_budget.saturating_sub(consumed);
+        let snippet = truncate_utf8_bytes(
+            &record.content,
+            usize::try_from(remaining.min(192).saturating_mul(4))
+                .unwrap_or(usize::MAX),
+        );
+        let cost = token_estimate(&snippet).saturating_add(token_estimate(
+            &serde_json::to_string(&provenance).unwrap_or_default(),
+        ));
+        if cost == 0 || consumed.saturating_add(cost) > token_budget {
+            break;
+        }
+        consumed = consumed.saturating_add(cost);
+        selected.push(record.id.clone());
+        hits.push(json!({
+            "id": record.id,
+            "kind": record.kind.as_db().to_ascii_lowercase(),
+            "snippet": snippet,
+            "updated_at": record.updated_at,
+            "sensitivity": record.sensitivity.as_db(),
+            "scope": record.scope.as_db(),
+            "scope_key": record.scope_key,
+            "importance": record.importance,
+            "confidence": record.confidence,
+            "token_estimate": token_estimate(&record.content),
+            "provenance": provenance,
+        }));
+    }
+    let trace_id = progressive_trace(
+        store,
+        namespace: &namespace,
+        workspace_id: &workspace_id,
+        query: source_id.unwrap_or("memory.timeline"),
+        scope: json!({
+            "source_id": source_id,
+            "scope_key": scope_key,
+            "around": around,
+            "token_budget": token_budget,
+            "mode": "timeline"
+        }),
+        candidates: &candidates,
+        selected: &selected,
+        token_cost: consumed,
+        elapsed: started,
+    )?;
+    Ok(json!({
+        "recall_trace_id": trace_id,
+        "hits": hits,
+        "consumed_tokens": consumed,
+        "has_more": selected.len() < candidates.len()
+    }))
+}
+
 fn manage(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
     let operation = as_str(payload, "operation")?;
     let args = payload
