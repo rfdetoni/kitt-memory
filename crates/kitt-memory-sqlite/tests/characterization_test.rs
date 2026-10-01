@@ -1,5 +1,5 @@
 use kitt_memory_core::*;
-use kitt_memory_sqlite::SqliteMemoryStore;
+use kitt_memory_sqlite::{SqliteMemoryStore, TimelineMemoryQuery};
 use std::sync::Arc;
 use std::thread;
 
@@ -668,16 +668,16 @@ fn progressive_hydration_and_timeline_preserve_scope_and_provenance() {
     assert_eq!(hydrated[0].id, record.id);
 
     let timeline = store
-        .timeline_memories(
-            "agent-cli",
-            "ws-progressive",
-            Some("session-42"),
-            Some("conv-a"),
-            None,
-            10,
-            true,
-            false,
-        )
+        .timeline_memories(&TimelineMemoryQuery {
+            namespace: "agent-cli",
+            workspace_id: "ws-progressive",
+            source_id: Some("session-42"),
+            scope_key: Some("conv-a"),
+            around: None,
+            limit: 10,
+            allow_private: true,
+            allow_secret: false,
+        })
         .unwrap();
     assert_eq!(timeline.len(), 1);
     assert_eq!(timeline[0].id, record.id);
