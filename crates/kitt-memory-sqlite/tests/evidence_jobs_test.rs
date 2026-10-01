@@ -84,7 +84,6 @@ fn jobs_are_deduplicated_and_leased() {
     let _ = std::fs::remove_file(db);
 }
 
-
 #[test]
 fn failed_jobs_use_deterministic_retry_backoff() {
     let db = path();
@@ -115,7 +114,7 @@ fn failed_jobs_use_deterministic_retry_backoff() {
 
 #[test]
 fn evidence_tiering_blocks_self_reinforcing_sources() {
-    use kitt_memory_core::{assess_evidence, EvidenceOrigin};
+    use kitt_memory_core::{EvidenceOrigin, assess_evidence};
 
     let user = assess_evidence(EvidenceOrigin::Human, "USER_CORRECTION");
     assert!(user.learnable);
