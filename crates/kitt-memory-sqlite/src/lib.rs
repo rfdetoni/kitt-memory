@@ -4,7 +4,8 @@ use kitt_memory_core::{
     MemorySchemaDefinition, MemoryScope, MemorySource, MemoryStatus, MemoryStore, MergeCandidate,
     MergeDisposition, NewConcept, NewContextNode, NewCorrection, NewMemory, NewMemorySource,
     RecallQuery, RecallTrace, Result, SemanticMemoryStore, SemanticReranker, Sensitivity,
-    StoredConcept, assess_merge_candidate, build_memory_baseline, now_epoch,
+    StoredConcept, assess_merge_candidate, build_memory_baseline, lexical_similarity_with_terms,
+    lexical_terms, now_epoch,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, types::Type};
 use std::{
@@ -24,7 +25,7 @@ mod semantic;
 
 pub use semantic::TimelineMemoryQuery;
 
-const STORE_SCHEMA_VERSION: i64 = 8;
+const STORE_SCHEMA_VERSION: i64 = 9;
 const MEMORY_COLUMNS: &str = "m.id,m.namespace,m.workspace_id,m.kind,m.content,m.normalized_content,m.status,m.sensitivity,m.scope,m.scope_key,m.importance,m.confidence,m.created_at,m.updated_at,m.last_accessed_at,m.access_count,m.valid_from,m.valid_until,m.supersedes_id,m.content_hash,m.pinned,m.metadata_json";
 
 fn ensure_private_database_file(path: &Path) -> Result<()> {
@@ -69,6 +70,7 @@ pub enum RequestReceipt {
 pub struct SqliteMemoryStore {
     path: PathBuf,
     writer: Mutex<Connection>,
+    readers: Mutex<Vec<Connection>>,
 }
 
 impl SqliteMemoryStore {
@@ -79,9 +81,14 @@ impl SqliteMemoryStore {
         }
         ensure_private_database_file(&path)?;
         let writer = Self::open_connection(&path)?;
+        let mut readers = Vec::with_capacity(4);
+        for _ in 0..4 {
+            readers.push(Self::open_connection(&path)?);
+        }
         let store = Self {
             path,
             writer: Mutex::new(writer),
+            readers: Mutex::new(readers),
         };
         {
             let mut conn = store.writer_conn()?;
@@ -172,11 +179,32 @@ impl SqliteMemoryStore {
             .map_err(storage)?;
         conn.pragma_update(None, "secure_delete", "ON")
             .map_err(storage)?;
+        conn.pragma_update(None, "cache_size", -8_192_i64)
+            .map_err(storage)?;
+        conn.pragma_update(None, "temp_store", "MEMORY")
+            .map_err(storage)?;
+        conn.pragma_update(None, "mmap_size", 67_108_864_i64)
+            .map_err(storage)?;
+        conn.pragma_update(None, "wal_autocheckpoint", 1_000_i64)
+            .map_err(storage)?;
         Ok(conn)
     }
 
     fn conn(&self) -> Result<Connection> {
-        Self::open_connection(&self.path)
+        self.readers
+            .lock()
+            .map_err(|_| MemoryError::Storage("memory reader pool lock poisoned".into()))?
+            .pop()
+            .map(Ok)
+            .unwrap_or_else(|| Self::open_connection(&self.path))
+    }
+
+    fn return_conn(&self, conn: Connection) {
+        if let Ok(mut readers) = self.readers.lock()
+            && readers.len() < 8
+        {
+            readers.push(conn);
+        }
     }
 
     fn writer_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
@@ -190,7 +218,9 @@ impl SqliteMemoryStore {
         f: impl FnOnce(&Connection) -> std::result::Result<T, rusqlite::Error>,
     ) -> Result<T> {
         let conn = self.conn()?;
-        f(&conn).map_err(storage)
+        let result = f(&conn).map_err(storage);
+        self.return_conn(conn);
+        result
     }
 
     fn load_recall_candidates(
@@ -208,26 +238,28 @@ impl SqliteMemoryStore {
             Vec::new()
         } else {
             self.with_conn(|conn| {
-                let sql = format!("SELECT {MEMORY_COLUMNS},bm25(memories_fts) FROM memories_fts JOIN memories m ON m.rowid=memories_fts.rowid WHERE memories_fts MATCH ?1 AND m.namespace=?2 AND (m.scope='global' OR (m.workspace_id=?3 AND m.scope='workspace') OR (m.workspace_id=?3 AND m.scope='conversation' AND m.scope_key=?4)) AND m.status='ACTIVE' AND (m.valid_from IS NULL OR m.valid_from<=?5) AND (m.valid_until IS NULL OR m.valid_until>?5) AND m.sensitivity<>'ephemeral' AND (m.sensitivity<>'private' OR ?6=1) AND (m.sensitivity<>'secret' OR ?7=1) ORDER BY bm25(memories_fts) ASC LIMIT ?8");
-                let mut stmt=conn.prepare(&sql)?;
+                let sql = format!("SELECT {MEMORY_COLUMNS},bm25(memories_fts,1.0,0.0,0.0,0.0) FROM memories_fts JOIN memories m ON m.rowid=memories_fts.rowid WHERE memories_fts MATCH ?1 AND m.namespace=?2 AND (m.scope='global' OR (m.workspace_id=?3 AND m.scope='workspace') OR (m.workspace_id=?3 AND m.scope='conversation' AND m.scope_key=?4)) AND m.status='ACTIVE' AND (m.valid_from IS NULL OR m.valid_from<=?5) AND (m.valid_until IS NULL OR m.valid_until>?5) AND m.sensitivity<>'ephemeral' AND (m.sensitivity<>'private' OR ?6=1) AND (m.sensitivity<>'secret' OR ?7=1) ORDER BY bm25(memories_fts,1.0,0.0,0.0,0.0) ASC LIMIT ?8");
+                let mut stmt=conn.prepare_cached(&sql)?;
                 stmt.query_map(params![fts,query.namespace,query.workspace_id,scope_key,at,query.allow_private as i64,query.allow_secret as i64,cap as i64],|row| Ok((map_memory_row(row)?,row.get::<_,f64>(22)? as f32)))?.collect::<std::result::Result<Vec<_>,_>>()
             })?
         };
-        let fallback=self.with_conn(|conn|{
-            let sql=format!("SELECT {MEMORY_COLUMNS},0.0 FROM memories m WHERE m.namespace=?1 AND (m.scope='global' OR (m.workspace_id=?2 AND m.scope='workspace') OR (m.workspace_id=?2 AND m.scope='conversation' AND m.scope_key=?3)) AND m.status='ACTIVE' AND (m.valid_from IS NULL OR m.valid_from<=?4) AND (m.valid_until IS NULL OR m.valid_until>?4) AND m.sensitivity<>'ephemeral' AND (m.sensitivity<>'private' OR ?5=1) AND (m.sensitivity<>'secret' OR ?6=1) ORDER BY m.pinned DESC,m.importance DESC,m.updated_at DESC LIMIT ?7");
-            let mut stmt=conn.prepare(&sql)?;
-            stmt.query_map(params![query.namespace,query.workspace_id,scope_key,at,query.allow_private as i64,query.allow_secret as i64,cap.clamp(1,32) as i64],|row| Ok((map_memory_row(row)?,row.get::<_,f64>(22)? as f32)))?.collect::<std::result::Result<Vec<_>,_>>()
-        })?;
-        let mut seen = rows
-            .iter()
-            .map(|(m, _)| m.id.clone())
-            .collect::<HashSet<_>>();
-        for candidate in fallback {
-            if seen.insert(candidate.0.id.clone()) {
-                rows.push(candidate);
+        let limit = query.limit.min(50);
+        if query.text.trim().is_empty() || rows.len() < limit.min(4) {
+            let terms = lexical_terms(&query.text);
+            let fallback=self.with_conn(|conn|{
+                let sql=format!("SELECT {MEMORY_COLUMNS},0.0 FROM memories m WHERE m.namespace=?1 AND (m.scope='global' OR (m.workspace_id=?2 AND m.scope='workspace') OR (m.workspace_id=?2 AND m.scope='conversation' AND m.scope_key=?3)) AND m.status='ACTIVE' AND (m.valid_from IS NULL OR m.valid_from<=?4) AND (m.valid_until IS NULL OR m.valid_until>?4) AND m.sensitivity<>'ephemeral' AND (m.sensitivity<>'private' OR ?5=1) AND (m.sensitivity<>'secret' OR ?6=1) ORDER BY m.pinned DESC,m.importance DESC,m.updated_at DESC LIMIT ?7");
+                let mut stmt=conn.prepare_cached(&sql)?;
+                stmt.query_map(params![query.namespace,query.workspace_id,scope_key,at,query.allow_private as i64,query.allow_secret as i64,cap.clamp(1,16) as i64],|row| Ok((map_memory_row(row)?,row.get::<_,f64>(22)? as f32)))?.collect::<std::result::Result<Vec<_>,_>>()
+            })?;
+            let mut seen = rows.iter().map(|(m, _)| m.id.clone()).collect::<HashSet<_>>();
+            for candidate in fallback {
+                let lexical = lexical_similarity_with_terms(&terms, &candidate.0);
+                if (query.text.trim().is_empty() || lexical >= 0.05) && seen.insert(candidate.0.id.clone()) {
+                    rows.push(candidate);
+                }
             }
         }
-        rows.truncate(cap.saturating_add(cap.clamp(1, 32)));
+        rows.truncate(cap.saturating_add(limit.min(16)));
         Ok(rows)
     }
 
@@ -235,82 +267,69 @@ impl SqliteMemoryStore {
         &self,
         query: &RecallQuery,
         reranker: Option<&dyn SemanticReranker>,
-        touch: bool,
     ) -> Result<Vec<MemoryRecord>> {
         if query.limit == 0 {
             return Ok(Vec::new());
         }
         let limit = query.limit.min(50);
-        let cap = (limit.saturating_mul(12)).clamp(64, 256);
+        let cap = (limit.saturating_mul(4)).clamp(16, 128);
         let candidates = self.load_recall_candidates(query, cap)?;
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
+        let terms = lexical_terms(&query.text);
         let records = candidates
             .iter()
+            .take(30)
             .map(|(m, _)| m.clone())
             .collect::<Vec<_>>();
-        let ids = records
-            .iter()
-            .map(|m| m.id.as_str())
-            .collect::<HashSet<_>>();
-        let semantic_scores = reranker
-            .and_then(|r| r.score(&query.text, &records).ok())
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|x| x.score.is_finite() && ids.contains(x.memory_id.as_str()))
-            .map(|x| (x.memory_id, x.score.clamp(0.0, 1.0)))
-            .collect::<HashMap<_, _>>();
+        let ids = records.iter().map(|m| m.id.as_str()).collect::<HashSet<_>>();
+        let lexical_margin_high = candidates.len() > 1
+            && (candidates[1].1.abs() - candidates[0].1.abs()).abs() >= 1.5;
+        let semantic_scores = if lexical_margin_high {
+            HashMap::new()
+        } else {
+            reranker
+                .and_then(|r| r.score(&query.text, &records).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|x| x.score.is_finite() && ids.contains(x.memory_id.as_str()))
+                .map(|x| (x.memory_id, x.score.clamp(0.0, 1.0)))
+                .collect::<HashMap<_, _>>()
+        };
         let now = query.as_of.unwrap_or_else(now_epoch);
         let semantic_enabled = !semantic_scores.is_empty();
         let mut ranked = candidates
             .into_iter()
             .enumerate()
-            .map(|(index, (memory, _))| {
-                let lexical = kitt_memory_core::lexical_similarity(&query.text, &memory);
+            .map(|(index, (memory, bm25))| {
+                let lexical = lexical_similarity_with_terms(&terms, &memory);
+                let fts_score = if bm25 == 0.0 { 0.0 } else { 1.0 / (1.0 + bm25.abs()) };
                 let retained = kitt_memory_core::retention_score(&memory, now).min(1.25);
                 let rr = 60.0 / (61.0 + index as f32);
                 let semantic = semantic_scores.get(&memory.id).copied().unwrap_or(0.0);
-                let score = if semantic_enabled {
-                    lexical * 0.30 + semantic * 0.35 + retained * 0.20 + rr * 0.15
+                let score = if query.text.trim().is_empty() {
+                    retained
+                } else if semantic_enabled {
+                    fts_score * 0.32 + lexical * 0.18 + semantic * 0.32 + retained * 0.10 + rr * 0.08
                 } else {
-                    lexical * 0.48 + retained * 0.32 + rr * 0.20
+                    fts_score * 0.50 + lexical * 0.24 + retained * 0.16 + rr * 0.10
                 };
                 (score, memory)
             })
             .collect::<Vec<_>>();
         ranked.sort_by(|l, r| r.0.total_cmp(&l.0).then_with(|| l.1.id.cmp(&r.1.id)));
-        let selected = ranked
+        let top = ranked.first().map(|item| item.0).unwrap_or(0.0);
+        let threshold = if query.text.trim().is_empty() { 0.0 } else { top * 0.30 };
+        Ok(ranked
             .into_iter()
+            .filter(|(score, _)| *score >= threshold)
             .take(limit)
             .map(|(_, m)| m)
-            .collect::<Vec<_>>();
-        if touch && !selected.is_empty() && query.as_of.is_none() {
-            self.touch_access(selected.iter().map(|m| m.id.as_str()))?;
-        }
-        Ok(selected)
+            .collect())
     }
 
-    fn touch_access<'a>(&self, ids: impl Iterator<Item = &'a str>) -> Result<()> {
-        let ids = ids.map(str::to_owned).collect::<Vec<_>>();
-        if ids.is_empty() {
-            return Ok(());
-        }
-        let placeholders = (0..ids.len())
-            .map(|index| format!("?{}", index + 2))
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "UPDATE memories SET last_accessed_at=?1,access_count=access_count+1              WHERE id IN ({placeholders})"
-        );
-        let mut values = Vec::<rusqlite::types::Value>::with_capacity(ids.len() + 1);
-        values.push(now_epoch().into());
-        values.extend(ids.into_iter().map(rusqlite::types::Value::from));
-        let conn = self.writer_conn()?;
-        conn.execute(&sql, rusqlite::params_from_iter(values))
-            .map_err(storage)?;
-        Ok(())
-    }
+
 }
 
 impl MemoryStore for SqliteMemoryStore {
@@ -383,7 +402,7 @@ impl MemoryStore for SqliteMemoryStore {
     }
 
     fn recall(&self, query: &RecallQuery) -> Result<Vec<MemoryRecord>> {
-        self.ranked_recall(query, None, true)
+        self.ranked_recall(query, None)
     }
 
     fn recall_with_reranker(
@@ -391,7 +410,7 @@ impl MemoryStore for SqliteMemoryStore {
         query: &RecallQuery,
         reranker: &dyn SemanticReranker,
     ) -> Result<Vec<MemoryRecord>> {
-        self.ranked_recall(query, Some(reranker), true)
+        self.ranked_recall(query, Some(reranker))
     }
 
     fn baseline(&self, query: &BaselineQuery) -> Result<MemoryBaseline> {
@@ -897,11 +916,8 @@ impl KnowledgeStore for SqliteMemoryStore {
 }
 
 fn fts_query(input: &str) -> String {
-    let mut terms = input
-        .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-')
-        .map(str::trim)
-        .filter(|term| term.chars().count() >= 2)
-        .take(16)
+    let mut terms = lexical_terms(input)
+        .into_iter()
         .map(|term| format!("\"{}\"", term.replace('"', "")))
         .collect::<Vec<_>>();
     terms.sort();
@@ -1191,6 +1207,14 @@ fn migrate(conn: &mut Connection) -> std::result::Result<(), rusqlite::Error> {
     }
     if current < 8 {
         tx.execute_batch("CREATE TABLE IF NOT EXISTS request_receipts(request_id TEXT PRIMARY KEY,digest TEXT NOT NULL,response TEXT,created_at INTEGER NOT NULL);CREATE INDEX IF NOT EXISTS idx_request_receipts_age ON request_receipts(created_at);")?;
+    }
+    if current < 9 {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS baseline_revisions(namespace TEXT NOT NULL,workspace_id TEXT NOT NULL,scope_key TEXT NOT NULL DEFAULT '',revision INTEGER NOT NULL DEFAULT 1,updated_at INTEGER NOT NULL,PRIMARY KEY(namespace,workspace_id,scope_key));
+             CREATE INDEX IF NOT EXISTS idx_recall_traces_age ON recall_traces(created_at);
+             CREATE INDEX IF NOT EXISTS idx_memory_receipts_age ON memory_consumption_receipts(consumed_at);"
+        )?;
+        tx.execute("UPDATE memories SET normalized_content=lower(normalized_content),content_hash=lower(content_hash)", [])?;
     }
     if current < STORE_SCHEMA_VERSION {
         tx.execute("UPDATE schema_info SET version=?1", [STORE_SCHEMA_VERSION])?;
