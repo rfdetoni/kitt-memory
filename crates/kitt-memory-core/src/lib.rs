@@ -436,7 +436,11 @@ fn fold_latin_diacritic(ch: char) -> char {
 pub fn normalize(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let mut separator = false;
-    for ch in value.chars().flat_map(char::to_lowercase).map(fold_latin_diacritic) {
+    for ch in value
+        .chars()
+        .flat_map(char::to_lowercase)
+        .map(fold_latin_diacritic)
+    {
         if ch.is_alphanumeric() || ch == '_' || ch == '-' {
             out.push(ch);
             separator = false;
