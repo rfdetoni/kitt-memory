@@ -1,5 +1,6 @@
 use kitt_memory_core::{
-    DreamRunRecord, EvidenceOrigin, KnowledgeRelation, KnowledgeStore, MemoryConsumptionReceipt,
+    BaselineQuery, DreamRunRecord, EvidenceOrigin, KnowledgeRelation, KnowledgeStore,
+    MemoryConsumptionReceipt,
     MemoryJob, MemoryKind, MemoryRecord, MemoryScope, MemorySource, MemoryStatus, MemoryStore,
     NewConcept, NewCorrection, NewMemory, RecallQuery, RecallTrace, SemanticMemoryStore,
     Sensitivity, assess_evidence, estimate_tokens, gist_for_content, hash_normalized, now_epoch,
@@ -763,6 +764,66 @@ fn progressive_timeline(store: &SqliteMemoryStore, payload: &Value) -> Result<Va
     }))
 }
 
+fn progressive_baseline(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
+    let namespace = payload
+        .get("namespace")
+        .and_then(Value::as_str)
+        .unwrap_or("agent-cli")
+        .trim()
+        .to_string();
+    let workspace_id = as_str(payload, "workspace_id")?.trim().to_string();
+    if workspace_id.is_empty() {
+        return Err("missing workspace_id".into());
+    }
+    let scope_key = payload
+        .get("scope_key")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let query = BaselineQuery {
+        namespace,
+        workspace_id,
+        scope_key,
+        max_tokens: payload
+            .get("max_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(800)
+            .clamp(64, 16_384) as usize,
+        as_of: payload.get("as_of").and_then(Value::as_i64),
+        allow_private: payload
+            .get("allow_private")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        allow_secret: payload
+            .get("allow_secret")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    };
+    let baseline = store.baseline(&query).map_err(|error| error.to_string())?;
+    let not_modified = payload
+        .get("if_none_match")
+        .and_then(Value::as_str)
+        .zip(baseline.etag.as_deref())
+        .is_some_and(|(provided, current)| provided == current);
+    if not_modified {
+        return Ok(json!({
+            "not_modified": true,
+            "etag": baseline.etag,
+            "baseline_revision": baseline.baseline_revision,
+            "estimated_tokens": 0
+        }));
+    }
+    Ok(json!({
+        "not_modified": false,
+        "etag": baseline.etag,
+        "baseline_revision": baseline.baseline_revision,
+        "entries": baseline.entries,
+        "estimated_tokens": baseline.estimated_tokens,
+        "max_tokens": baseline.max_tokens,
+        "dropped_count": baseline.dropped_count,
+        "budget_pressure": baseline.budget_pressure
+    }))
+}
+
 fn manage(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
     let operation = as_str(payload, "operation")?;
     let args = payload
@@ -1238,6 +1299,10 @@ fn handle_authorized(store: &SqliteMemoryStore, frame: Frame, token: &str) -> Re
         }
         "memory.search.request" => match progressive_search(store, &frame.envelope.payload) {
             Ok(value) => response("memory.search.response", id, value),
+            Err(message) => error(Some(id), "memory_error", message),
+        },
+        "memory.baseline.request" => match progressive_baseline(store, &frame.envelope.payload) {
+            Ok(value) => response("memory.baseline.response", id, value),
             Err(message) => error(Some(id), "memory_error", message),
         },
         "memory.timeline.request" => match progressive_timeline(store, &frame.envelope.payload) {
