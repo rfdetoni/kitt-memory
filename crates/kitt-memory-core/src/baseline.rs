@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    MemoryKind, MemoryRecord, MemoryScope, MemoryStatus, Sensitivity, now_epoch,
-    ranking::retention_score,
+    MemoryKind, MemoryRecord, MemoryScope, MemoryStatus, Sensitivity, estimate_tokens, now_epoch,
 };
 
 #[derive(Debug, Clone)]
@@ -32,6 +31,10 @@ pub struct MemoryBaseline {
     pub max_tokens: usize,
     pub dropped_count: usize,
     pub budget_pressure: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
 }
 
 fn allowed(memory: &MemoryRecord, query: &BaselineQuery, now: i64) -> bool {
@@ -75,12 +78,39 @@ fn section(kind: &MemoryKind) -> (&'static str, u8) {
     }
 }
 
-fn truncate_chars(value: &str, max_chars: usize) -> String {
+fn truncate_at_boundary(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_string();
     }
-    let keep = max_chars.saturating_sub(3);
-    format!("{}...", value.chars().take(keep).collect::<String>())
+    let hard = value
+        .char_indices()
+        .nth(max_chars.saturating_sub(1))
+        .map(|(index, _)| index)
+        .unwrap_or(value.len());
+    let prefix = &value[..hard];
+    let boundary = prefix
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| matches!(ch, '.' | '!' | '?' | '\n'))
+        .map(|(index, ch)| index + ch.len_utf8())
+        .filter(|index| *index >= hard / 2)
+        .unwrap_or(hard);
+    format!("{}…", prefix[..boundary].trim_end())
+}
+
+fn stable_score(memory: &MemoryRecord) -> f32 {
+    let kind_bonus = match memory.kind {
+        MemoryKind::ProjectRule | MemoryKind::ArchitectureDecision => 0.20,
+        MemoryKind::UserPreference => 0.15,
+        MemoryKind::TechnicalFact | MemoryKind::WorkingPattern => 0.08,
+        _ => 0.0,
+    };
+    let updated_day = memory.updated_at.div_euclid(86_400).max(0) as f32;
+    memory.importance.clamp(0.0, 1.0) * 0.52
+        + memory.confidence.clamp(0.0, 1.0) * 0.28
+        + if memory.pinned { 0.45 } else { 0.0 }
+        + kind_bonus
+        + (updated_day.min(100_000.0) / 100_000.0) * 0.01
 }
 
 pub fn build_memory_baseline(
@@ -97,13 +127,7 @@ pub fn build_memory_baseline(
         .filter(|memory| allowed(memory, query, now))
         .map(|memory| {
             let (label, rank) = section(&memory.kind);
-            let score = retention_score(&memory, now)
-                + if memory.pinned { 0.4 } else { 0.0 }
-                + match memory.kind {
-                    MemoryKind::ProjectRule | MemoryKind::ArchitectureDecision => 0.2,
-                    MemoryKind::UserPreference => 0.15,
-                    _ => 0.0,
-                };
+            let score = stable_score(&memory);
             (memory, label, rank, score)
         })
         .collect::<Vec<_>>();
@@ -124,16 +148,15 @@ pub fn build_memory_baseline(
     let mut used_chars = 0usize;
 
     for (memory, label, _, score) in candidates {
-        let content = truncate_chars(&memory.content, per_entry_chars);
-        let cost = content
-            .chars()
-            .count()
-            .saturating_add(label.len())
-            .saturating_add(8);
-        if used_chars.saturating_add(cost) > max_chars {
+        let content = truncate_at_boundary(&memory.content, per_entry_chars);
+        let cost_tokens = estimate_tokens(&content)
+            .saturating_add(estimate_tokens(label))
+            .saturating_add(2);
+        let used_tokens = estimate_tokens(&"x".repeat(used_chars));
+        if used_tokens.saturating_add(cost_tokens) > max_tokens {
             continue;
         }
-        used_chars = used_chars.saturating_add(cost);
+        used_chars = used_chars.saturating_add(content.chars().count()).saturating_add(label.len());
         entries.push(BaselineEntry {
             memory_id: memory.id,
             section: label.into(),
@@ -147,7 +170,10 @@ pub fn build_memory_baseline(
     }
 
     let dropped_count = eligible.saturating_sub(entries.len());
-    let estimated_tokens = (used_chars.saturating_add(3)) / 4;
+    let estimated_tokens = entries
+        .iter()
+        .map(|entry| estimate_tokens(&entry.content).saturating_add(estimate_tokens(&entry.section)).saturating_add(2))
+        .sum::<usize>();
     let pressure = if max_tokens == 0 {
         1.0
     } else {
@@ -160,6 +186,8 @@ pub fn build_memory_baseline(
         max_tokens,
         dropped_count,
         budget_pressure: pressure.min(1.5),
+        baseline_revision: None,
+        etag: None,
     }
 }
 
@@ -217,5 +245,34 @@ mod tests {
         assert_eq!(result.entries[0].memory_id, "a");
         assert!(result.dropped_count > 0);
         assert!(result.budget_pressure > 0.0);
+    }
+
+    #[test]
+    fn baseline_order_does_not_depend_on_access_history_or_wall_clock() {
+        let mut a = item("a", MemoryKind::TechnicalFact, "alpha", false);
+        let mut b = item("b", MemoryKind::TechnicalFact, "beta", false);
+        a.access_count = 999;
+        a.last_accessed_at = Some(9_999_999);
+        b.access_count = 0;
+        b.last_accessed_at = None;
+        let query = BaselineQuery {
+            namespace: "agent".into(),
+            workspace_id: "ws".into(),
+            scope_key: None,
+            max_tokens: 200,
+            as_of: Some(10_000_000),
+            allow_private: true,
+            allow_secret: false,
+        };
+        let first = build_memory_baseline(vec![a.clone(), b.clone()], &query);
+        a.access_count = 0;
+        a.last_accessed_at = None;
+        b.access_count = 999;
+        b.last_accessed_at = Some(10_000_000);
+        let second = build_memory_baseline(vec![a, b], &query);
+        assert_eq!(
+            first.entries.iter().map(|entry| &entry.memory_id).collect::<Vec<_>>(),
+            second.entries.iter().map(|entry| &entry.memory_id).collect::<Vec<_>>()
+        );
     }
 }
