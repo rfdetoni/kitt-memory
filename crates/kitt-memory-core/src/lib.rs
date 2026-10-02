@@ -480,7 +480,6 @@ pub fn estimate_tokens(value: &str) -> usize {
         .saturating_add(punctuation.div_ceil(12))
 }
 
-
 /// Produces a compact, deterministic gist at a sentence/line boundary.
 pub fn gist_for_content(value: &str, max_chars: usize) -> String {
     let trimmed = value.trim();
