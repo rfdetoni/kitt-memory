@@ -146,16 +146,17 @@ pub fn build_memory_baseline(
     let eligible = candidates.len();
     let mut entries = Vec::new();
     let mut used_chars = 0usize;
+    let mut used_tokens = 0usize;
 
     for (memory, label, _, score) in candidates {
         let content = truncate_at_boundary(&memory.content, per_entry_chars);
         let cost_tokens = estimate_tokens(&content)
             .saturating_add(estimate_tokens(label))
             .saturating_add(2);
-        let used_tokens = estimate_tokens(&"x".repeat(used_chars));
         if used_tokens.saturating_add(cost_tokens) > max_tokens {
             continue;
         }
+        used_tokens = used_tokens.saturating_add(cost_tokens);
         used_chars = used_chars.saturating_add(content.chars().count()).saturating_add(label.len());
         entries.push(BaselineEntry {
             memory_id: memory.id,
@@ -170,10 +171,7 @@ pub fn build_memory_baseline(
     }
 
     let dropped_count = eligible.saturating_sub(entries.len());
-    let estimated_tokens = entries
-        .iter()
-        .map(|entry| estimate_tokens(&entry.content).saturating_add(estimate_tokens(&entry.section)).saturating_add(2))
-        .sum::<usize>();
+    let estimated_tokens = used_tokens;
     let pressure = if max_tokens == 0 {
         1.0
     } else {
