@@ -419,4 +419,3 @@ pub(super) fn handle(store: &SqliteMemoryStore, payload: &Value) -> Result<Value
         other => Err(format!("unsupported memory management operation: {other}")),
     }
 }
-
