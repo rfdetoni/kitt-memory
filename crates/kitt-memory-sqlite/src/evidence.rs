@@ -6,6 +6,7 @@ use crate::{SqliteMemoryStore, storage};
 impl SqliteMemoryStore {
     pub fn record_consumption_receipt(&self, receipt: &MemoryConsumptionReceipt) -> Result<()> {
         receipt.validate()?;
+        self.flush_recall_traces()?;
         let conn = self.writer_conn()?;
         conn.execute(
             "INSERT INTO memory_consumption_receipts(
