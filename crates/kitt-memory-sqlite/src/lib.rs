@@ -242,7 +242,7 @@ impl SqliteMemoryStore {
         } else {
             self.with_conn(|conn| {
                 let sql = format!("SELECT {MEMORY_COLUMNS},bm25(memories_fts,0.0,0.0,0.0,1.0) FROM memories_fts JOIN memories m ON m.rowid=memories_fts.rowid WHERE memories_fts MATCH ?1 AND m.namespace=?2 AND (m.scope='global' OR (m.workspace_id=?3 AND m.scope='workspace') OR (m.workspace_id=?3 AND m.scope='conversation' AND m.scope_key=?4)) AND m.status='ACTIVE' AND (m.valid_from IS NULL OR m.valid_from<=?5) AND (m.valid_until IS NULL OR m.valid_until>?5) AND m.sensitivity<>'ephemeral' AND (m.sensitivity<>'private' OR ?6=1) AND (m.sensitivity<>'secret' OR ?7=1) ORDER BY bm25(memories_fts,0.0,0.0,0.0,1.0) ASC LIMIT ?8");
-                let mut stmt=conn.prepare_cached(&sql)?;
+                let mut stmt=conn.prepare(&sql)?;
                 stmt.query_map(params![fts,query.namespace,query.workspace_id,scope_key,at,query.allow_private as i64,query.allow_secret as i64,cap as i64],|row| Ok((map_memory_row(row)?,row.get::<_,f64>(24)? as f32)))?.collect::<std::result::Result<Vec<_>,_>>()
             })?
         };
@@ -251,7 +251,7 @@ impl SqliteMemoryStore {
             let terms = lexical_terms(&query.text);
             let fallback=self.with_conn(|conn|{
                 let sql=format!("SELECT {MEMORY_COLUMNS},0.0 FROM memories m WHERE m.namespace=?1 AND (m.scope='global' OR (m.workspace_id=?2 AND m.scope='workspace') OR (m.workspace_id=?2 AND m.scope='conversation' AND m.scope_key=?3)) AND m.status='ACTIVE' AND (m.valid_from IS NULL OR m.valid_from<=?4) AND (m.valid_until IS NULL OR m.valid_until>?4) AND m.sensitivity<>'ephemeral' AND (m.sensitivity<>'private' OR ?5=1) AND (m.sensitivity<>'secret' OR ?6=1) ORDER BY m.pinned DESC,m.importance DESC,m.updated_at DESC LIMIT ?7");
-                let mut stmt=conn.prepare_cached(&sql)?;
+                let mut stmt=conn.prepare(&sql)?;
                 stmt.query_map(params![query.namespace,query.workspace_id,scope_key,at,query.allow_private as i64,query.allow_secret as i64,cap.clamp(1,16) as i64],|row| Ok((map_memory_row(row)?,row.get::<_,f64>(24)? as f32)))?.collect::<std::result::Result<Vec<_>,_>>()
             })?;
             let mut seen = rows.iter().map(|(m, _)| m.id.clone()).collect::<HashSet<_>>();
