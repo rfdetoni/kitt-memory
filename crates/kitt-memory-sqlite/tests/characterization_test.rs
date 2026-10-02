@@ -749,6 +749,39 @@ fn migration_v8_to_v9_rehashes_without_data_loss_or_sensitivity_downgrade() {
 
     drop(conn);
     drop(store);
+
+    let reopened = SqliteMemoryStore::open(&db).unwrap();
+    let inserted = reopened
+        .remember(NewMemory {
+            namespace: "agent-cli".into(),
+            workspace_id: "ws".into(),
+            kind: MemoryKind::TechnicalFact,
+            content: "Restart-safe FTS trigger".into(),
+            sensitivity: Sensitivity::Private,
+            scope: MemoryScope::Workspace,
+            scope_key: None,
+            importance: 0.7,
+            confidence: 1.0,
+            pinned: false,
+            ttl_seconds: None,
+            metadata_json: "{}".into(),
+        })
+        .unwrap();
+    let recalled = reopened
+        .recall(&RecallQuery {
+            namespace: "agent-cli".into(),
+            workspace_id: "ws".into(),
+            scope_key: None,
+            text: "restart safe trigger".into(),
+            limit: 5,
+            as_of: None,
+            allow_private: true,
+            allow_secret: false,
+        })
+        .unwrap();
+    assert!(recalled.iter().any(|record| record.id == inserted.id));
+
+    drop(reopened);
     let _ = std::fs::remove_file(&db);
 }
 
