@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.1 — 2026-10-02
+
+- Keep bounded connection admission compatible with Rust 1.88 and current stable Clippy using compare_exchange rather than deprecated fetch_update.
+
 ## 0.8.0 — 2026-10-02
 
 - Bound daemon frames, absolute read deadlines, writes and concurrent connections.

@@ -1340,12 +1340,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for incoming in listener.incoming() {
         match incoming {
             Ok(stream) => {
-                if active
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                        (count < MAX_CONNECTIONS).then_some(count + 1)
-                    })
-                    .is_err()
-                {
+                // compare_exchange works on MSRV 1.88 and on stable Rust, where
+                // fetch_update has been renamed/deprecated.
+                let admitted = loop {
+                    let count = active.load(Ordering::Acquire);
+                    if count >= MAX_CONNECTIONS {
+                        break false;
+                    }
+                    if active
+                        .compare_exchange_weak(
+                            count,
+                            count + 1,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        break true;
+                    }
+                };
+                if !admitted {
                     drop(stream);
                     continue;
                 }
