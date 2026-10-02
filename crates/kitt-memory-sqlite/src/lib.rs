@@ -254,10 +254,15 @@ impl SqliteMemoryStore {
                 let mut stmt=conn.prepare(&sql)?;
                 stmt.query_map(params![query.namespace,query.workspace_id,scope_key,at,query.allow_private as i64,query.allow_secret as i64,cap.clamp(1,16) as i64],|row| Ok((map_memory_row(row)?,row.get::<_,f64>(24)? as f32)))?.collect::<std::result::Result<Vec<_>,_>>()
             })?;
-            let mut seen = rows.iter().map(|(m, _)| m.id.clone()).collect::<HashSet<_>>();
+            let mut seen = rows
+                .iter()
+                .map(|(m, _)| m.id.clone())
+                .collect::<HashSet<_>>();
             for candidate in fallback {
                 let lexical = lexical_similarity_with_terms(&terms, &candidate.0);
-                if (query.text.trim().is_empty() || lexical >= 0.05) && seen.insert(candidate.0.id.clone()) {
+                if (query.text.trim().is_empty() || lexical >= 0.05)
+                    && seen.insert(candidate.0.id.clone())
+                {
                     rows.push(candidate);
                 }
             }
@@ -303,9 +308,12 @@ impl SqliteMemoryStore {
             .take(30)
             .map(|(m, _)| m.clone())
             .collect::<Vec<_>>();
-        let ids = records.iter().map(|m| m.id.as_str()).collect::<HashSet<_>>();
-        let lexical_margin_high = candidates.len() > 1
-            && (candidates[1].1.abs() - candidates[0].1.abs()).abs() >= 1.5;
+        let ids = records
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect::<HashSet<_>>();
+        let lexical_margin_high =
+            candidates.len() > 1 && (candidates[1].1.abs() - candidates[0].1.abs()).abs() >= 1.5;
         let semantic_scores = if lexical_margin_high {
             HashMap::new()
         } else {
@@ -324,14 +332,22 @@ impl SqliteMemoryStore {
             .enumerate()
             .map(|(index, (memory, bm25))| {
                 let lexical = lexical_similarity_with_terms(&terms, &memory);
-                let fts_score = if bm25 == 0.0 { 0.0 } else { 1.0 / (1.0 + bm25.abs()) };
+                let fts_score = if bm25 == 0.0 {
+                    0.0
+                } else {
+                    1.0 / (1.0 + bm25.abs())
+                };
                 let retained = kitt_memory_core::retention_score(&memory, now).min(1.25);
                 let rr = 60.0 / (61.0 + index as f32);
                 let semantic = semantic_scores.get(&memory.id).copied().unwrap_or(0.0);
                 let score = if query.text.trim().is_empty() {
                     retained
                 } else if semantic_enabled {
-                    fts_score * 0.32 + lexical * 0.18 + semantic * 0.32 + retained * 0.10 + rr * 0.08
+                    fts_score * 0.32
+                        + lexical * 0.18
+                        + semantic * 0.32
+                        + retained * 0.10
+                        + rr * 0.08
                 } else {
                     fts_score * 0.50 + lexical * 0.24 + retained * 0.16 + rr * 0.10
                 };
@@ -340,7 +356,11 @@ impl SqliteMemoryStore {
             .collect::<Vec<_>>();
         ranked.sort_by(|l, r| r.0.total_cmp(&l.0).then_with(|| l.1.id.cmp(&r.1.id)));
         let top = ranked.first().map(|item| item.0).unwrap_or(0.0);
-        let threshold = if query.text.trim().is_empty() { 0.0 } else { top * 0.30 };
+        let threshold = if query.text.trim().is_empty() {
+            0.0
+        } else {
+            top * 0.30
+        };
         Ok(ranked
             .into_iter()
             .filter(|(score, _)| *score >= threshold)
@@ -348,7 +368,6 @@ impl SqliteMemoryStore {
             .map(|(_, m)| m)
             .collect())
     }
-
 
 }
 
@@ -1044,7 +1063,10 @@ fn map_memory_row(row: &rusqlite::Row<'_>) -> std::result::Result<MemoryRecord, 
         tokens_est: {
             let value = row.get::<_, i64>(23)?;
             if value < 0 {
-                return Err(data_error(23, MemoryError::Corrupt("negative tokens_est".into())));
+                return Err(data_error(
+                    23,
+                    MemoryError::Corrupt("negative tokens_est".into()),
+                ));
             }
             value as usize
         },
@@ -1252,10 +1274,16 @@ fn migrate(conn: &mut Connection) -> std::result::Result<(), rusqlite::Error> {
     }
     if current < 9 {
         if !table_has_column(&tx, "memories", "gist")? {
-            tx.execute("ALTER TABLE memories ADD COLUMN gist TEXT NOT NULL DEFAULT ''", [])?;
+            tx.execute(
+                "ALTER TABLE memories ADD COLUMN gist TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
         }
         if !table_has_column(&tx, "memories", "tokens_est")? {
-            tx.execute("ALTER TABLE memories ADD COLUMN tokens_est INTEGER NOT NULL DEFAULT 0", [])?;
+            tx.execute(
+                "ALTER TABLE memories ADD COLUMN tokens_est INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
         }
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS baseline_revisions(namespace TEXT NOT NULL,workspace_id TEXT NOT NULL,scope_key TEXT NOT NULL DEFAULT '',revision INTEGER NOT NULL DEFAULT 1,updated_at INTEGER NOT NULL,PRIMARY KEY(namespace,workspace_id,scope_key));
@@ -1265,8 +1293,10 @@ fn migrate(conn: &mut Connection) -> std::result::Result<(), rusqlite::Error> {
         )?;
         let rows = {
             let mut stmt = tx.prepare("SELECT id,content FROM memories")?;
-            stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
-                .collect::<std::result::Result<Vec<_>, _>>()?
+            stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
         };
         for (id, content) in rows {
             let normalized = normalize(&content);
