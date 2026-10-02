@@ -236,9 +236,9 @@ pub struct MemoryRecord {
     pub supersedes_id: Option<String>,
     pub content_hash: String,
     pub pinned: bool,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing)]
     pub gist: String,
-    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    #[serde(default, skip_serializing)]
     pub tokens_est: usize,
     pub metadata_json: String,
 }
@@ -480,9 +480,6 @@ pub fn estimate_tokens(value: &str) -> usize {
         .saturating_add(punctuation.div_ceil(12))
 }
 
-fn is_zero_usize(value: &usize) -> bool {
-    *value == 0
-}
 
 /// Produces a compact, deterministic gist at a sentence/line boundary.
 pub fn gist_for_content(value: &str, max_chars: usize) -> String {
