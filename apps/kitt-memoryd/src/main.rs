@@ -371,6 +371,10 @@ fn progressive_search(store: &SqliteMemoryStore, payload: &Value) -> Result<Valu
         .get("include_provenance")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let include_context_hints = payload
+        .get("include_context_hints")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let excluded = payload
         .get("exclude_ids")
         .and_then(Value::as_array)
@@ -384,19 +388,23 @@ fn progressive_search(store: &SqliteMemoryStore, payload: &Value) -> Result<Valu
         })
         .unwrap_or_default();
 
-    let context_hints = store
-        .search_context_nodes(&namespace, &workspace_id, &query_text, 4)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|node| {
-            json!({
-                "id": node.id,
-                "path": node.path,
-                "summary": gist_for_content(&node.navigation_summary, 120),
-                "generation": node.generation
+    let context_hints = if include_context_hints {
+        store
+            .search_context_nodes(&namespace, &workspace_id, &query_text, 4)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|node| {
+                json!({
+                    "id": node.id,
+                    "path": node.path,
+                    "summary": gist_for_content(&node.navigation_summary, 120),
+                    "generation": node.generation
+                })
             })
-        })
-        .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
 
     let query = RecallQuery {
         namespace: namespace.clone(),
@@ -418,18 +426,22 @@ fn progressive_search(store: &SqliteMemoryStore, payload: &Value) -> Result<Valu
     let candidates = records.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
     let provenance = provenance_for_many(store, &candidates, include_provenance)?;
 
-    let common_scope = records.first().and_then(|first| {
-        records
-            .iter()
-            .all(|record| record.scope == first.scope && record.scope_key == first.scope_key)
-            .then(|| (first.scope.as_db().to_string(), first.scope_key.clone()))
-    });
-    let common_sensitivity = records.first().and_then(|first| {
-        records
-            .iter()
-            .all(|record| record.sensitivity == first.sensitivity)
-            .then(|| first.sensitivity.as_db().to_string())
-    });
+    let common_scope = include_context_hints.then(|| {
+        records.first().and_then(|first| {
+            records
+                .iter()
+                .all(|record| record.scope == first.scope && record.scope_key == first.scope_key)
+                .then(|| (first.scope.as_db().to_string(), first.scope_key.clone()))
+        })
+    }).flatten();
+    let common_sensitivity = include_context_hints.then(|| {
+        records.first().and_then(|first| {
+            records
+                .iter()
+                .all(|record| record.sensitivity == first.sensitivity)
+                .then(|| first.sensitivity.as_db().to_string())
+        })
+    }).flatten();
 
     let mut consumed = 0_u64;
     let mut hits = Vec::new();
@@ -490,6 +502,7 @@ fn progressive_search(store: &SqliteMemoryStore, payload: &Value) -> Result<Valu
                 "token_budget": token_budget,
                 "max_results": max_results,
                 "include_provenance": include_provenance,
+                "include_context_hints": include_context_hints,
                 "excluded_count": excluded.len(),
                 "mode": "search"
             }),
@@ -508,7 +521,6 @@ fn progressive_search(store: &SqliteMemoryStore, payload: &Value) -> Result<Valu
         "has_more".into(),
         json!(selected.len() < candidates.len() || !excluded.is_empty()),
     );
-    result.insert("context_hints".into(), json!(context_hints));
     let mut common = serde_json::Map::new();
     if let Some(sensitivity) = common_sensitivity {
         common.insert("sensitivity".into(), json!(sensitivity));
@@ -519,8 +531,11 @@ fn progressive_search(store: &SqliteMemoryStore, payload: &Value) -> Result<Valu
             common.insert("scope_key".into(), json!(scope_key));
         }
     }
-    if !common.is_empty() {
-        result.insert("common".into(), Value::Object(common));
+    if include_context_hints {
+        result.insert("context_hints".into(), json!(context_hints));
+        if !common.is_empty() {
+            result.insert("common".into(), Value::Object(common));
+        }
     }
     Ok(Value::Object(result))
 }
@@ -1527,7 +1542,7 @@ fn serve_connection(mut stream: TcpStream, store: Arc<SqliteMemoryStore>, token:
         return;
     }
     loop {
-        let mut line = match read_frame(&mut stream, Duration::from_secs(30)) {
+        let mut line = match read_frame(&mut stream, Duration::from_secs(2)) {
             Ok(line) => line,
             Err(error)
                 if matches!(
