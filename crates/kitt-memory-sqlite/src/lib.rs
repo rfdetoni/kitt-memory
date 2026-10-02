@@ -10,7 +10,7 @@ use kitt_memory_core::{
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, types::Type};
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
     sync::Mutex,
@@ -72,6 +72,7 @@ pub struct SqliteMemoryStore {
     path: PathBuf,
     writer: Mutex<Connection>,
     readers: Mutex<Vec<Connection>>,
+    trace_buffer: Mutex<VecDeque<RecallTrace>>,
 }
 
 impl SqliteMemoryStore {
@@ -90,6 +91,7 @@ impl SqliteMemoryStore {
             path,
             writer: Mutex::new(writer),
             readers: Mutex::new(readers),
+            trace_buffer: Mutex::new(VecDeque::with_capacity(256)),
         };
         {
             let mut conn = store.writer_conn()?;
