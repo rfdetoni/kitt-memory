@@ -1302,7 +1302,12 @@ fn handle_authorized(store: &SqliteMemoryStore, frame: Frame, token: &str) -> Re
                             id: trace_id.clone(),
                             namespace: query.namespace.clone(),
                             workspace_id: query.workspace_id.clone(),
-                            query: query.text.clone(),
+                            query: if query.allow_private || query.allow_secret {
+                                let digest = hash_normalized(&query.text);
+                                format!("sha256:{}", &digest[..16.min(digest.len())])
+                            } else {
+                                query.text.clone()
+                            },
                             planned_scopes_json: serde_json::to_string(&json!({
                                 "scope_key": query.scope_key,
                                 "as_of": query.as_of,
@@ -1314,7 +1319,13 @@ fn handle_authorized(store: &SqliteMemoryStore, frame: Frame, token: &str) -> Re
                             selected_json,
                             token_cost: records
                                 .iter()
-                                .map(|record| record.content.len().div_ceil(4) as u64)
+                                .map(|record| {
+                                    if record.tokens_est > 0 {
+                                        u64::try_from(record.tokens_est).unwrap_or(u64::MAX)
+                                    } else {
+                                        token_estimate(&record.content)
+                                    }
+                                })
                                 .sum(),
                             semantic_fallback: false,
                             elapsed_us: started.elapsed().as_micros().min(u64::MAX as u128) as u64,
