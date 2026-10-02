@@ -211,6 +211,57 @@ impl SqliteMemoryStore {
     }
 }
 
+impl SqliteMemoryStore {
+    /// Flush buffered recall traces in one short transaction.
+    pub fn flush_recall_traces(&self) -> Result<usize> {
+        let batch = {
+            let mut queue = self
+                .trace_buffer
+                .lock()
+                .map_err(|_| MemoryError::Storage("recall trace buffer lock poisoned".into()))?;
+            if queue.is_empty() {
+                return Ok(0);
+            }
+            queue.drain(..).collect::<Vec<_>>()
+        };
+        let mut conn = self.writer_conn()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        for trace in &batch {
+            if let Err(error) = tx.execute(
+                "INSERT OR REPLACE INTO recall_traces(id,namespace,workspace_id,query,planned_scopes_json,candidates_json,selected_json,token_cost,semantic_fallback,elapsed_us,context_hash,created_at)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                params![
+                    trace.id,
+                    trace.namespace,
+                    trace.workspace_id,
+                    trace.query,
+                    trace.planned_scopes_json,
+                    trace.candidates_json,
+                    trace.selected_json,
+                    trace.token_cost as i64,
+                    trace.semantic_fallback as i64,
+                    trace.elapsed_us as i64,
+                    trace.context_hash,
+                    trace.created_at
+                ],
+            ) {
+                drop(tx);
+                drop(conn);
+                if let Ok(mut queue) = self.trace_buffer.lock() {
+                    for trace in batch.into_iter().rev() {
+                        queue.push_front(trace);
+                    }
+                }
+                return Err(storage(error));
+            }
+        }
+        tx.commit().map_err(storage)?;
+        Ok(batch.len())
+    }
+}
+
 impl SemanticMemoryStore for SqliteMemoryStore {
     fn upsert_context_node(&self, node: NewContextNode) -> Result<ContextNode> {
         let node = node.into_record()?;
@@ -374,17 +425,19 @@ impl SemanticMemoryStore for SqliteMemoryStore {
     }
 
     fn record_recall_trace(&self, trace: &RecallTrace) -> Result<()> {
-        let conn = self.writer_conn()?;
-        conn.execute(
-            "INSERT OR REPLACE INTO recall_traces(id,namespace,workspace_id,query,planned_scopes_json,candidates_json,selected_json,token_cost,semantic_fallback,elapsed_us,context_hash,created_at)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-            params![trace.id,trace.namespace,trace.workspace_id,trace.query,trace.planned_scopes_json,trace.candidates_json,
-                trace.selected_json,trace.token_cost as i64,trace.semantic_fallback as i64,trace.elapsed_us as i64,trace.context_hash,trace.created_at],
-        ).map_err(storage)?;
+        let mut queue = self
+            .trace_buffer
+            .lock()
+            .map_err(|_| MemoryError::Storage("recall trace buffer lock poisoned".into()))?;
+        if queue.len() >= 4_096 {
+            queue.pop_front();
+        }
+        queue.push_back(trace.clone());
         Ok(())
     }
 
     fn recent_recall_traces(&self, workspace_id: &str, limit: usize) -> Result<Vec<RecallTrace>> {
+        self.flush_recall_traces()?;
         self.with_conn(|conn| {
             let mut stmt=conn.prepare(
                 "SELECT id,namespace,workspace_id,query,planned_scopes_json,candidates_json,selected_json,token_cost,semantic_fallback,elapsed_us,context_hash,created_at
