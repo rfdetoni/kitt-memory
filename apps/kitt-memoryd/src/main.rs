@@ -1565,10 +1565,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let maintenance_store = Arc::clone(&store);
         thread::Builder::new()
             .name("memory-maintenance".into())
-            .spawn(move || loop {
-                thread::sleep(Duration::from_secs(5));
-                if let Err(error) = maintenance_store.flush_recall_traces() {
-                    eprintln!("kitt-memoryd trace flush error: {error}");
+            .spawn(move || {
+                let mut ticks = 0_u8;
+                loop {
+                    thread::sleep(Duration::from_secs(5));
+                    ticks = ticks.wrapping_add(1);
+                    if let Err(error) = maintenance_store.flush_recall_traces() {
+                        eprintln!("kitt-memoryd trace flush error: {error}");
+                    }
+                    if ticks >= 12 {
+                        ticks = 0;
+                        if let Err(error) = maintenance_store.periodic_maintenance() {
+                            eprintln!("kitt-memoryd maintenance error: {error}");
+                        }
+                    }
                 }
             })?;
     }
