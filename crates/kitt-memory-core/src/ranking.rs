@@ -36,26 +36,36 @@ pub struct MergeCandidate {
     pub assessment: MergeAssessment,
 }
 
+const STOPWORDS: &[&str] = &[
+    "a", "as", "ao", "aos", "de", "da", "das", "do", "dos", "e", "em", "na", "nas",
+    "no", "nos", "o", "os", "para", "por", "que", "um", "uma", "the", "and", "or", "of",
+    "in", "on", "to", "for", "with", "is", "are", "be",
+];
+
 pub fn lexical_terms(query: &str) -> HashSet<String> {
     normalize(query)
         .split_whitespace()
-        .filter(|term| term.len() >= 2)
+        .filter(|term| term.len() >= 2 && !STOPWORDS.contains(term))
+        .take(16)
         .map(str::to_owned)
         .collect()
 }
 
-pub fn lexical_similarity(query: &str, memory: &MemoryRecord) -> f32 {
-    let query_terms = lexical_terms(query);
-    if query_terms.is_empty() {
+pub fn lexical_similarity_with_terms(terms: &HashSet<String>, memory: &MemoryRecord) -> f32 {
+    if terms.is_empty() {
         return 0.0;
     }
     let memory_terms = lexical_terms(&memory.normalized_content);
     if memory_terms.is_empty() {
         return 0.0;
     }
-    let overlap = query_terms.intersection(&memory_terms).count() as f32;
-    let union = query_terms.union(&memory_terms).count() as f32;
+    let overlap = terms.intersection(&memory_terms).count() as f32;
+    let union = terms.union(&memory_terms).count() as f32;
     if union == 0.0 { 0.0 } else { overlap / union }
+}
+
+pub fn lexical_similarity(query: &str, memory: &MemoryRecord) -> f32 {
+    lexical_similarity_with_terms(&lexical_terms(query), memory)
 }
 
 pub fn retention_score(memory: &MemoryRecord, now: i64) -> f32 {
@@ -77,9 +87,7 @@ pub fn retention_score(memory: &MemoryRecord, now: i64) -> f32 {
 }
 
 pub fn lexical_score_with_terms(terms: &HashSet<String>, memory: &MemoryRecord, now: i64) -> f32 {
-    let memory_terms = lexical_terms(&memory.normalized_content);
-    let overlap = terms.intersection(&memory_terms).count() as f32;
-    overlap * 1.5 + retention_score(memory, now) * 4.0
+    lexical_similarity_with_terms(terms, memory) * 6.0 + retention_score(memory, now) * 4.0
 }
 
 pub fn lexical_score(query: &str, memory: &MemoryRecord, now: i64) -> f32 {
@@ -210,6 +218,16 @@ mod tests {
         accessed.last_accessed_at = Some(1_000_000);
         accessed.access_count = 8;
         assert!(retention_score(&accessed, 1_000_100) > retention_score(&old, 1_000_100));
+    }
+
+    #[test]
+    fn lexical_terms_drop_common_pt_en_stopwords() {
+        let terms = lexical_terms("a memória do agent and the project rule");
+        assert!(!terms.contains("a"));
+        assert!(!terms.contains("do"));
+        assert!(!terms.contains("and"));
+        assert!(terms.contains("memoria"));
+        assert!(terms.contains("agent"));
     }
 
     #[test]
