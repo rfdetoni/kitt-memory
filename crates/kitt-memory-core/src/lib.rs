@@ -475,7 +475,6 @@ pub fn estimate_tokens(value: &str) -> usize {
         }
     }
     ascii
-        .saturating_add(3)
         .div_ceil(4)
         .saturating_add(non_ascii.saturating_mul(2))
         .saturating_add(punctuation.div_ceil(12))
