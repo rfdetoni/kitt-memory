@@ -677,7 +677,6 @@ fn progressive_hydration_and_timeline_preserve_scope_and_provenance() {
     let _ = std::fs::remove_file(&db);
 }
 
-
 #[test]
 fn migration_v8_to_v9_rehashes_without_data_loss_or_sensitivity_downgrade() {
     use rusqlite::Connection;
@@ -730,7 +729,9 @@ fn migration_v8_to_v9_rehashes_without_data_loss_or_sensitivity_downgrade() {
 
     let conn = Connection::open(&db).unwrap();
     let version: i64 = conn
-        .query_row("SELECT version FROM schema_info LIMIT 1", [], |row| row.get(0))
+        .query_row("SELECT version FROM schema_info LIMIT 1", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     let total: i64 = conn
         .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
@@ -782,7 +783,9 @@ fn baseline_revision_ignores_access_telemetry_but_tracks_semantic_changes() {
     };
 
     let first = store.baseline(&query).unwrap();
-    store.touch_records(std::slice::from_ref(&record.id)).unwrap();
+    store
+        .touch_records(std::slice::from_ref(&record.id))
+        .unwrap();
     let second = store.baseline(&query).unwrap();
     assert_eq!(first.baseline_revision, second.baseline_revision);
     assert_eq!(first.etag, second.etag);
