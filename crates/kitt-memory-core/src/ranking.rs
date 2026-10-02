@@ -37,9 +37,9 @@ pub struct MergeCandidate {
 }
 
 const STOPWORDS: &[&str] = &[
-    "a", "as", "ao", "aos", "de", "da", "das", "do", "dos", "e", "em", "na", "nas",
-    "no", "nos", "o", "os", "para", "por", "que", "um", "uma", "the", "and", "or", "of",
-    "in", "on", "to", "for", "with", "is", "are", "be",
+    "a", "as", "ao", "aos", "de", "da", "das", "do", "dos", "e", "em", "na", "nas", "no", "nos",
+    "o", "os", "para", "por", "que", "um", "uma", "the", "and", "or", "of", "in", "on", "to",
+    "for", "with", "is", "are", "be",
 ];
 
 pub fn lexical_terms(query: &str) -> HashSet<String> {
