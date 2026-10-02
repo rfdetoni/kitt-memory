@@ -1556,7 +1556,7 @@ fn serve_connection(mut stream: TcpStream, store: Arc<SqliteMemoryStore>, token:
         }
         let reply = match serde_json::from_slice::<Frame>(&line) {
             Ok(frame) => handle(&store, frame, &token),
-            Err(error) => error(None, "invalid_json", error.to_string()),
+            Err(parse_error) => error(None, "invalid_json", parse_error.to_string()),
         };
         let Ok(mut encoded) = serde_json::to_string(&reply) else {
             return;
