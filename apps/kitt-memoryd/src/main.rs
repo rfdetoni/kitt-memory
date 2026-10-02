@@ -1,23 +1,22 @@
 use kitt_memory_core::{
-    DreamRunRecord, EvidenceOrigin, KnowledgeRelation, KnowledgeStore, MemoryConsumptionReceipt,
-    MemoryJob, MemoryKind, MemoryRecord, MemoryScope, MemorySource, MemoryStatus, MemoryStore,
-    NewConcept, NewCorrection, NewMemory, RecallQuery, RecallTrace, SemanticMemoryStore,
-    Sensitivity, assess_evidence, hash_normalized, now_epoch,
+    BaselineQuery, DreamRunRecord, EvidenceOrigin, KnowledgeRelation, KnowledgeStore,
+    MemoryConsumptionReceipt, MemoryJob, MemoryKind, MemoryRecord, MemoryScope, MemorySource,
+    MemoryStatus, MemoryStore, NewConcept, NewCorrection, NewMemory, RecallQuery, RecallTrace,
+    SemanticMemoryStore, Sensitivity, assess_evidence, estimate_tokens, gist_for_content,
+    hash_normalized, now_epoch,
 };
 use kitt_memory_sqlite::{RequestReceipt, SqliteMemoryStore, TimelineMemoryQuery};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::{HashMap, HashSet},
     env,
     fs::{self, OpenOptions},
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -175,18 +174,99 @@ fn as_str<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
 }
 
 fn token_estimate(text: &str) -> u64 {
-    text.len().div_ceil(4) as u64
+    u64::try_from(estimate_tokens(text)).unwrap_or(u64::MAX)
 }
 
-fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
+fn centered_snippet(value: &str, query: &str, max_tokens: u64) -> String {
+    let max_bytes = usize::try_from(max_tokens.saturating_mul(3))
+        .unwrap_or(usize::MAX)
+        .max(48);
     if value.len() <= max_bytes {
         return value.to_string();
     }
-    let mut end = max_bytes.min(value.len());
-    while end > 0 && !value.is_char_boundary(end) {
+    let haystack = value.to_ascii_lowercase();
+    let match_at = query
+        .split_whitespace()
+        .map(|term| term.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-'))
+        .filter(|term| term.chars().count() >= 2)
+        .filter_map(|term| haystack.find(&term.to_ascii_lowercase()))
+        .min();
+    let Some(center) = match_at else {
+        return gist_for_content(value, max_bytes / 2);
+    };
+    let mut start = center.saturating_sub(max_bytes / 2);
+    while start < value.len() && !value.is_char_boundary(start) {
+        start += 1;
+    }
+    let mut end = start.saturating_add(max_bytes).min(value.len());
+    while end > start && !value.is_char_boundary(end) {
         end -= 1;
     }
-    value[..end].to_string()
+    let body = value[start..end].trim();
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.push_str(body);
+    if end < value.len() {
+        out.push('…');
+    }
+    while token_estimate(&out) > max_tokens && out.chars().count() > 32 {
+        let target = out.chars().count().saturating_sub(16);
+        out = gist_for_content(&out, target);
+    }
+    out
+}
+
+fn constant_time_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    let mut diff = left.len() ^ right.len();
+    let max = left.len().max(right.len());
+    for index in 0..max {
+        let a = left.get(index).copied().unwrap_or(0);
+        let b = right.get(index).copied().unwrap_or(0);
+        diff |= usize::from(a ^ b);
+    }
+    diff == 0
+}
+
+fn source_to_value(source: MemorySource) -> Value {
+    let uri = source.source_uri.unwrap_or_else(|| {
+        format!(
+            "kitt://memory-source/{}/{}",
+            source.source_kind.trim().to_ascii_lowercase(),
+            source.source_id
+        )
+    });
+    json!({
+        "uri": uri,
+        "revision": source.source_revision,
+        "digest": source.source_digest
+    })
+}
+
+fn provenance_for_many(
+    store: &SqliteMemoryStore,
+    memory_ids: &[String],
+    include: bool,
+) -> Result<HashMap<String, Vec<Value>>, String> {
+    if !include || memory_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    store
+        .sources_for_memories(memory_ids)
+        .map(|rows| {
+            rows.into_iter()
+                .map(|(memory_id, sources)| {
+                    (
+                        memory_id,
+                        sources.into_iter().map(source_to_value).collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .map_err(|error| error.to_string())
 }
 
 struct ProgressiveTraceInput<'a> {
@@ -211,11 +291,27 @@ fn progressive_trace(
         "{}|{}|{}|{selected_json}",
         input.namespace, input.workspace_id, input.query
     ));
+    let private_query = input
+        .scope
+        .get("allow_private")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || input
+            .scope
+            .get("allow_secret")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    let stored_query = if private_query {
+        let digest = hash_normalized(input.query);
+        format!("sha256:{}", &digest[..16.min(digest.len())])
+    } else {
+        input.query.to_string()
+    };
     let trace = RecallTrace {
         id: trace_id.clone(),
         namespace: input.namespace.to_string(),
         workspace_id: input.workspace_id.to_string(),
-        query: input.query.to_string(),
+        query: stored_query,
         planned_scopes_json: serde_json::to_string(&input.scope).unwrap_or_else(|_| "{}".into()),
         candidates_json,
         selected_json,
@@ -229,31 +325,6 @@ fn progressive_trace(
         .record_recall_trace(&trace)
         .map_err(|error| error.to_string())?;
     Ok(trace_id)
-}
-
-fn provenance_for(store: &SqliteMemoryStore, memory_id: &str) -> Result<Vec<Value>, String> {
-    store
-        .sources_for_memory(memory_id)
-        .map(|rows| {
-            rows.into_iter()
-                .take(8)
-                .map(|source| {
-                    let uri = source.source_uri.unwrap_or_else(|| {
-                        format!(
-                            "kitt://memory-source/{}/{}",
-                            source.source_kind.trim().to_ascii_lowercase(),
-                            source.source_id
-                        )
-                    });
-                    json!({
-                        "uri": uri,
-                        "revision": source.source_revision,
-                        "digest": source.source_digest
-                    })
-                })
-                .collect()
-        })
-        .map_err(|error| error.to_string())
 }
 
 fn progressive_search(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
@@ -296,18 +367,88 @@ fn progressive_search(store: &SqliteMemoryStore, payload: &Value) -> Result<Valu
         .get("allow_secret")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let include_provenance = payload
+        .get("include_provenance")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let include_context_hints = payload
+        .get("include_context_hints")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let excluded = payload
+        .get("exclude_ids")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .take(256)
+                .map(str::to_string)
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+
+    let context_hints = if include_context_hints {
+        store
+            .search_context_nodes(&namespace, &workspace_id, &query_text, 4)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|node| {
+                json!({
+                    "id": node.id,
+                    "path": node.path,
+                    "summary": gist_for_content(&node.navigation_summary, 120),
+                    "generation": node.generation
+                })
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
     let query = RecallQuery {
         namespace: namespace.clone(),
         workspace_id: workspace_id.clone(),
         scope_key: scope_key.clone(),
         text: query_text.clone(),
-        limit: max_results,
+        limit: max_results.saturating_add(excluded.len().min(32)),
         as_of,
         allow_private,
         allow_secret,
     };
-    let records = store.recall(&query).map_err(|error| error.to_string())?;
+    let records = store
+        .recall(&query)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|record| !excluded.contains(&record.id))
+        .take(max_results)
+        .collect::<Vec<_>>();
     let candidates = records.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
+    let provenance = provenance_for_many(store, &candidates, include_provenance)?;
+
+    let common_scope = include_context_hints
+        .then(|| {
+            records.first().and_then(|first| {
+                records
+                    .iter()
+                    .all(|record| {
+                        record.scope == first.scope && record.scope_key == first.scope_key
+                    })
+                    .then(|| (first.scope.as_db().to_string(), first.scope_key.clone()))
+            })
+        })
+        .flatten();
+    let common_sensitivity = include_context_hints
+        .then(|| {
+            records.first().and_then(|first| {
+                records
+                    .iter()
+                    .all(|record| record.sensitivity == first.sensitivity)
+                    .then(|| first.sensitivity.as_db().to_string())
+            })
+        })
+        .flatten();
+
     let mut consumed = 0_u64;
     let mut hits = Vec::new();
     let mut selected = Vec::new();
@@ -315,38 +456,44 @@ fn progressive_search(store: &SqliteMemoryStore, payload: &Value) -> Result<Valu
         if consumed >= token_budget {
             break;
         }
-        let provenance = provenance_for(store, &record.id)?;
-        let provenance_cost =
-            token_estimate(&serde_json::to_string(&provenance).unwrap_or_default());
-        let remaining = token_budget.saturating_sub(consumed + provenance_cost);
+        let sources = provenance.get(&record.id).cloned().unwrap_or_default();
+        let provenance_cost = if include_provenance {
+            token_estimate(&serde_json::to_string(&sources).unwrap_or_default())
+        } else {
+            0
+        };
+        let remaining = token_budget.saturating_sub(consumed.saturating_add(provenance_cost));
         if remaining == 0 {
             break;
         }
-        let desired = remaining.min(192);
-        let snippet = truncate_utf8_bytes(
-            &record.content,
-            usize::try_from(desired.saturating_mul(4)).unwrap_or(usize::MAX),
-        );
-        let snippet_tokens = token_estimate(&snippet);
-        let cost = snippet_tokens.saturating_add(provenance_cost);
+        let snippet = if query_text.trim().is_empty() && !record.gist.is_empty() {
+            record.gist.clone()
+        } else {
+            centered_snippet(&record.content, &query_text, remaining.min(56))
+        };
+        let cost = token_estimate(&snippet).saturating_add(provenance_cost);
         if cost == 0 || consumed.saturating_add(cost) > token_budget {
             break;
         }
         consumed = consumed.saturating_add(cost);
         selected.push(record.id.clone());
-        hits.push(json!({
-            "id": record.id,
-            "kind": record.kind.as_db().to_ascii_lowercase(),
-            "snippet": snippet,
-            "sensitivity": record.sensitivity.as_db(),
-            "scope": record.scope.as_db(),
-            "scope_key": record.scope_key,
-            "importance": record.importance,
-            "confidence": record.confidence,
-            "token_estimate": snippet_tokens,
-            "provenance": provenance,
-        }));
+        let mut hit = serde_json::Map::new();
+        hit.insert("id".into(), json!(record.id));
+        hit.insert(
+            "kind".into(),
+            json!(record.kind.as_db().to_ascii_lowercase()),
+        );
+        hit.insert("snippet".into(), json!(snippet));
+        hit.insert("importance".into(), json!(record.importance));
+        hit.insert("confidence".into(), json!(record.confidence));
+        hit.insert("sensitivity".into(), json!(record.sensitivity.as_db()));
+        hit.insert("scope".into(), json!(record.scope.as_db()));
+        hit.insert("scope_key".into(), json!(record.scope_key));
+        hit.insert("token_estimate".into(), json!(token_estimate(&snippet)));
+        hit.insert("provenance".into(), json!(sources));
+        hits.push(Value::Object(hit));
     }
+
     let trace_id = progressive_trace(
         store,
         ProgressiveTraceInput {
@@ -360,6 +507,9 @@ fn progressive_search(store: &SqliteMemoryStore, payload: &Value) -> Result<Valu
                 "allow_secret": allow_secret,
                 "token_budget": token_budget,
                 "max_results": max_results,
+                "include_provenance": include_provenance,
+                "include_context_hints": include_context_hints,
+                "excluded_count": excluded.len(),
                 "mode": "search"
             }),
             candidates: &candidates,
@@ -368,12 +518,32 @@ fn progressive_search(store: &SqliteMemoryStore, payload: &Value) -> Result<Valu
             elapsed: started,
         },
     )?;
-    Ok(json!({
-        "recall_trace_id": trace_id,
-        "hits": hits,
-        "consumed_tokens": consumed,
-        "has_more": selected.len() < candidates.len()
-    }))
+
+    let mut result = serde_json::Map::new();
+    result.insert("recall_trace_id".into(), json!(trace_id));
+    result.insert("hits".into(), json!(hits));
+    result.insert("consumed_tokens".into(), json!(consumed));
+    result.insert(
+        "has_more".into(),
+        json!(selected.len() < candidates.len() || !excluded.is_empty()),
+    );
+    let mut common = serde_json::Map::new();
+    if let Some(sensitivity) = common_sensitivity {
+        common.insert("sensitivity".into(), json!(sensitivity));
+    }
+    if let Some((scope, scope_key)) = common_scope {
+        common.insert("scope".into(), json!(scope));
+        if let Some(scope_key) = scope_key {
+            common.insert("scope_key".into(), json!(scope_key));
+        }
+    }
+    if include_context_hints {
+        result.insert("context_hints".into(), json!(context_hints));
+        if !common.is_empty() {
+            result.insert("common".into(), Value::Object(common));
+        }
+    }
+    Ok(Value::Object(result))
 }
 
 fn progressive_get(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
@@ -408,6 +578,10 @@ fn progressive_get(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, 
         .get("allow_secret")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let include_provenance = payload
+        .get("include_provenance")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
     let rows = store
         .get_many_scoped(
             &namespace,
@@ -419,26 +593,38 @@ fn progressive_get(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, 
         )
         .map_err(|error| error.to_string())?;
     let candidates = rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
+    let provenance = provenance_for_many(store, &candidates, include_provenance)?;
     let mut records = Vec::new();
     let mut selected = Vec::new();
     let mut truncated_ids = Vec::new();
     let mut consumed = 0_u64;
     for record in rows {
-        let provenance = provenance_for(store, &record.id)?;
-        let cost = token_estimate(&record.content).saturating_add(token_estimate(
-            &serde_json::to_string(&provenance).unwrap_or_default(),
-        ));
+        let sources = provenance.get(&record.id).cloned().unwrap_or_default();
+        let content_cost = if record.tokens_est > 0 {
+            u64::try_from(record.tokens_est).unwrap_or(u64::MAX)
+        } else {
+            token_estimate(&record.content)
+        };
+        let provenance_cost = if include_provenance {
+            token_estimate(&serde_json::to_string(&sources).unwrap_or_default())
+        } else {
+            0
+        };
+        let cost = content_cost.saturating_add(provenance_cost);
         if consumed.saturating_add(cost) > token_budget {
             truncated_ids.push(record.id.clone());
             continue;
         }
         consumed = consumed.saturating_add(cost);
         selected.push(record.id.clone());
-        records.push(json!({
-            "record": record,
-            "provenance": provenance
-        }));
+        let mut value = serde_json::Map::new();
+        value.insert("record".into(), json!(record));
+        value.insert("provenance".into(), json!(sources));
+        records.push(Value::Object(value));
     }
+    store
+        .touch_memories(&selected)
+        .map_err(|error| error.to_string())?;
     let trace_id = progressive_trace(
         store,
         ProgressiveTraceInput {
@@ -449,6 +635,7 @@ fn progressive_get(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, 
                 "scope_key": scope_key,
                 "allow_private": allow_private,
                 "allow_secret": allow_secret,
+                "include_provenance": include_provenance,
                 "token_budget": token_budget,
                 "mode": "get"
             }),
@@ -496,6 +683,10 @@ fn progressive_timeline(store: &SqliteMemoryStore, payload: &Value) -> Result<Va
         .get("allow_secret")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let include_provenance = payload
+        .get("include_provenance")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let rows = store
         .timeline_memories(&TimelineMemoryQuery {
             namespace: &namespace,
@@ -509,6 +700,7 @@ fn progressive_timeline(store: &SqliteMemoryStore, payload: &Value) -> Result<Va
         })
         .map_err(|error| error.to_string())?;
     let candidates = rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
+    let provenance = provenance_for_many(store, &candidates, include_provenance)?;
     let mut hits = Vec::new();
     let mut selected = Vec::new();
     let mut consumed = 0_u64;
@@ -516,33 +708,40 @@ fn progressive_timeline(store: &SqliteMemoryStore, payload: &Value) -> Result<Va
         if consumed >= token_budget {
             break;
         }
-        let provenance = provenance_for(store, &record.id)?;
-        let remaining = token_budget.saturating_sub(consumed);
-        let snippet = truncate_utf8_bytes(
-            &record.content,
-            usize::try_from(remaining.min(192).saturating_mul(4)).unwrap_or(usize::MAX),
-        );
-        let cost = token_estimate(&snippet).saturating_add(token_estimate(
-            &serde_json::to_string(&provenance).unwrap_or_default(),
-        ));
+        let sources = provenance.get(&record.id).cloned().unwrap_or_default();
+        let provenance_cost = if include_provenance {
+            token_estimate(&serde_json::to_string(&sources).unwrap_or_default())
+        } else {
+            0
+        };
+        let remaining = token_budget.saturating_sub(consumed.saturating_add(provenance_cost));
+        let snippet = if !record.gist.is_empty() {
+            record.gist.clone()
+        } else {
+            centered_snippet(&record.content, source_id.unwrap_or(""), remaining.min(56))
+        };
+        let cost = token_estimate(&snippet).saturating_add(provenance_cost);
         if cost == 0 || consumed.saturating_add(cost) > token_budget {
             break;
         }
         consumed = consumed.saturating_add(cost);
         selected.push(record.id.clone());
-        hits.push(json!({
-            "id": record.id,
-            "kind": record.kind.as_db().to_ascii_lowercase(),
-            "snippet": snippet,
-            "updated_at": record.updated_at,
-            "sensitivity": record.sensitivity.as_db(),
-            "scope": record.scope.as_db(),
-            "scope_key": record.scope_key,
-            "importance": record.importance,
-            "confidence": record.confidence,
-            "token_estimate": token_estimate(&record.content),
-            "provenance": provenance,
-        }));
+        let mut hit = serde_json::Map::new();
+        hit.insert("id".into(), json!(record.id));
+        hit.insert(
+            "kind".into(),
+            json!(record.kind.as_db().to_ascii_lowercase()),
+        );
+        hit.insert("snippet".into(), json!(snippet));
+        hit.insert("updated_at".into(), json!(record.updated_at));
+        hit.insert("sensitivity".into(), json!(record.sensitivity.as_db()));
+        hit.insert("scope".into(), json!(record.scope.as_db()));
+        hit.insert("scope_key".into(), json!(record.scope_key));
+        hit.insert("importance".into(), json!(record.importance));
+        hit.insert("confidence".into(), json!(record.confidence));
+        hit.insert("token_estimate".into(), json!(token_estimate(&snippet)));
+        hit.insert("provenance".into(), json!(sources));
+        hits.push(Value::Object(hit));
     }
     let trace_id = progressive_trace(
         store,
@@ -554,6 +753,9 @@ fn progressive_timeline(store: &SqliteMemoryStore, payload: &Value) -> Result<Va
                 "source_id": source_id,
                 "scope_key": scope_key,
                 "around": around,
+                "allow_private": allow_private,
+                "allow_secret": allow_secret,
+                "include_provenance": include_provenance,
                 "token_budget": token_budget,
                 "mode": "timeline"
             }),
@@ -568,6 +770,66 @@ fn progressive_timeline(store: &SqliteMemoryStore, payload: &Value) -> Result<Va
         "hits": hits,
         "consumed_tokens": consumed,
         "has_more": selected.len() < candidates.len()
+    }))
+}
+
+fn progressive_baseline(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
+    let namespace = payload
+        .get("namespace")
+        .and_then(Value::as_str)
+        .unwrap_or("agent-cli")
+        .trim()
+        .to_string();
+    let workspace_id = as_str(payload, "workspace_id")?.trim().to_string();
+    if workspace_id.is_empty() {
+        return Err("missing workspace_id".into());
+    }
+    let scope_key = payload
+        .get("scope_key")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let query = BaselineQuery {
+        namespace,
+        workspace_id,
+        scope_key,
+        max_tokens: payload
+            .get("max_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(800)
+            .clamp(64, 16_384) as usize,
+        as_of: payload.get("as_of").and_then(Value::as_i64),
+        allow_private: payload
+            .get("allow_private")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        allow_secret: payload
+            .get("allow_secret")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    };
+    let baseline = store.baseline(&query).map_err(|error| error.to_string())?;
+    let not_modified = payload
+        .get("if_none_match")
+        .and_then(Value::as_str)
+        .zip(baseline.etag.as_deref())
+        .is_some_and(|(provided, current)| provided == current);
+    if not_modified {
+        return Ok(json!({
+            "not_modified": true,
+            "etag": baseline.etag,
+            "baseline_revision": baseline.baseline_revision,
+            "estimated_tokens": 0
+        }));
+    }
+    Ok(json!({
+        "not_modified": false,
+        "etag": baseline.etag,
+        "baseline_revision": baseline.baseline_revision,
+        "entries": baseline.entries,
+        "estimated_tokens": baseline.estimated_tokens,
+        "max_tokens": baseline.max_tokens,
+        "dropped_count": baseline.dropped_count,
+        "budget_pressure": baseline.budget_pressure
     }))
 }
 
@@ -984,7 +1246,7 @@ fn manage(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
 }
 
 fn handle_authorized(store: &SqliteMemoryStore, frame: Frame, token: &str) -> ResponseEnvelope {
-    if frame.token != token {
+    if !constant_time_eq(&frame.token, token) {
         return error(
             Some(&frame.envelope.id),
             "unauthorized",
@@ -1046,6 +1308,10 @@ fn handle_authorized(store: &SqliteMemoryStore, frame: Frame, token: &str) -> Re
         }
         "memory.search.request" => match progressive_search(store, &frame.envelope.payload) {
             Ok(value) => response("memory.search.response", id, value),
+            Err(message) => error(Some(id), "memory_error", message),
+        },
+        "memory.baseline.request" => match progressive_baseline(store, &frame.envelope.payload) {
+            Ok(value) => response("memory.baseline.response", id, value),
             Err(message) => error(Some(id), "memory_error", message),
         },
         "memory.timeline.request" => match progressive_timeline(store, &frame.envelope.payload) {
@@ -1110,7 +1376,12 @@ fn handle_authorized(store: &SqliteMemoryStore, frame: Frame, token: &str) -> Re
                             id: trace_id.clone(),
                             namespace: query.namespace.clone(),
                             workspace_id: query.workspace_id.clone(),
-                            query: query.text.clone(),
+                            query: if query.allow_private || query.allow_secret {
+                                let digest = hash_normalized(&query.text);
+                                format!("sha256:{}", &digest[..16.min(digest.len())])
+                            } else {
+                                query.text.clone()
+                            },
                             planned_scopes_json: serde_json::to_string(&json!({
                                 "scope_key": query.scope_key,
                                 "as_of": query.as_of,
@@ -1122,7 +1393,13 @@ fn handle_authorized(store: &SqliteMemoryStore, frame: Frame, token: &str) -> Re
                             selected_json,
                             token_cost: records
                                 .iter()
-                                .map(|record| record.content.len().div_ceil(4) as u64)
+                                .map(|record| {
+                                    if record.tokens_est > 0 {
+                                        u64::try_from(record.tokens_est).unwrap_or(u64::MAX)
+                                    } else {
+                                        token_estimate(&record.content)
+                                    }
+                                })
                                 .sum(),
                             semantic_fallback: false,
                             elapsed_us: started.elapsed().as_micros().min(u64::MAX as u128) as u64,
@@ -1170,7 +1447,7 @@ fn handle_authorized(store: &SqliteMemoryStore, frame: Frame, token: &str) -> Re
 }
 
 fn handle(store: &SqliteMemoryStore, frame: Frame, token: &str) -> ResponseEnvelope {
-    if frame.token != token {
+    if !constant_time_eq(&frame.token, token) {
         return error(None, "unauthorized", "invalid authentication");
     }
     if frame.envelope.version != 1
@@ -1235,13 +1512,6 @@ fn handle(store: &SqliteMemoryStore, frame: Frame, token: &str) -> ResponseEnvel
     reply
 }
 
-struct ConnectionPermit(Arc<AtomicUsize>);
-impl Drop for ConnectionPermit {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
 fn read_frame(stream: &mut TcpStream, timeout: Duration) -> std::io::Result<Vec<u8>> {
     let deadline = Instant::now() + timeout;
     let mut line = Vec::new();
@@ -1277,31 +1547,44 @@ fn serve_connection(mut stream: TcpStream, store: Arc<SqliteMemoryStore>, token:
     {
         return;
     }
-    let mut line = match read_frame(&mut stream, Duration::from_secs(2)) {
-        Ok(line) => line,
-        Err(_) => return,
-    };
-    while matches!(line.last(), Some(b'\n' | b'\r')) {
-        line.pop();
-    }
-    let reply = match serde_json::from_slice::<Frame>(&line) {
-        Ok(frame) => handle(&store, frame, &token),
-        Err(e) => error(None, "invalid_json", e.to_string()),
-    };
-    if let Ok(mut encoded) = serde_json::to_string(&reply) {
+    loop {
+        let mut line = match read_frame(&mut stream, Duration::from_secs(2)) {
+            Ok(line) => line,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return;
+            }
+            Err(_) => return,
+        };
+        while matches!(line.last(), Some(b'\n' | b'\r')) {
+            line.pop();
+        }
+        let reply = match serde_json::from_slice::<Frame>(&line) {
+            Ok(frame) => handle(&store, frame, &token),
+            Err(parse_error) => error(None, "invalid_json", parse_error.to_string()),
+        };
+        let Ok(mut encoded) = serde_json::to_string(&reply) else {
+            return;
+        };
         if encoded.len() + 1 > MAX_FRAME_BYTES {
             encoded = serde_json::to_string(&error(
                 reply.correlation_id.as_deref(),
                 "frame_too_large",
                 "response exceeds frame limit",
             ))
-            .unwrap();
+            .unwrap_or_else(|_| {
+                "{\"version\":1,\"id\":\"error\",\"kind\":\"system.error\",\"payload\":{}}".into()
+            });
         }
-        let _ = stream.write_all(encoded.as_bytes());
-        let _ = stream.write_all(b"\n");
+        if stream.write_all(encoded.as_bytes()).is_err() || stream.write_all(b"\n").is_err() {
+            return;
+        }
     }
 }
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = env::args().skip(1).collect::<Vec<_>>();
     if args.iter().any(|arg| arg == "--version" || arg == "-V") {
@@ -1336,42 +1619,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(SqliteMemoryStore::open(db_path)?);
     let listener = TcpListener::bind(&addr)?;
     eprintln!("kitt-memoryd listening on {addr}");
-    let active = Arc::new(AtomicUsize::new(0));
+
+    let worker_count = thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(4)
+        .clamp(2, 8);
+    let (sender, receiver) = mpsc::sync_channel::<TcpStream>(MAX_CONNECTIONS);
+    let receiver = Arc::new(Mutex::new(receiver));
+    for index in 0..worker_count {
+        let receiver = Arc::clone(&receiver);
+        let store = Arc::clone(&store);
+        let token = Arc::clone(&token);
+        thread::Builder::new()
+            .name(format!("memory-worker-{index}"))
+            .spawn(move || {
+                loop {
+                    let stream = {
+                        let Ok(receiver) = receiver.lock() else {
+                            return;
+                        };
+                        receiver.recv()
+                    };
+                    match stream {
+                        Ok(stream) => {
+                            serve_connection(stream, Arc::clone(&store), Arc::clone(&token))
+                        }
+                        Err(_) => return,
+                    }
+                }
+            })?;
+    }
+
+    {
+        let maintenance_store = Arc::clone(&store);
+        thread::Builder::new()
+            .name("memory-maintenance".into())
+            .spawn(move || {
+                let mut ticks = 0_u8;
+                loop {
+                    thread::sleep(Duration::from_secs(5));
+                    ticks = ticks.wrapping_add(1);
+                    if let Err(error) = maintenance_store.flush_recall_traces() {
+                        eprintln!("kitt-memoryd trace flush error: {error}");
+                    }
+                    if ticks >= 12 {
+                        ticks = 0;
+                        if let Err(error) = maintenance_store.periodic_maintenance() {
+                            eprintln!("kitt-memoryd maintenance error: {error}");
+                        }
+                    }
+                }
+            })?;
+    }
+
     for incoming in listener.incoming() {
         match incoming {
             Ok(stream) => {
-                // compare_exchange works on MSRV 1.88 and on stable Rust, where
-                // fetch_update has been renamed/deprecated.
-                let admitted = loop {
-                    let count = active.load(Ordering::Acquire);
-                    if count >= MAX_CONNECTIONS {
-                        break false;
+                if let Err(error) = sender.try_send(stream) {
+                    match error {
+                        mpsc::TrySendError::Full(stream)
+                        | mpsc::TrySendError::Disconnected(stream) => drop(stream),
                     }
-                    if active
-                        .compare_exchange_weak(
-                            count,
-                            count + 1,
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                        )
-                        .is_ok()
-                    {
-                        break true;
-                    }
-                };
-                if !admitted {
-                    drop(stream);
-                    continue;
                 }
-                let permit = ConnectionPermit(Arc::clone(&active));
-                let store = Arc::clone(&store);
-                let token = Arc::clone(&token);
-                let _ = thread::Builder::new()
-                    .name("memory-request".into())
-                    .spawn(move || {
-                        let _permit = permit;
-                        serve_connection(stream, store, token);
-                    });
             }
             Err(error) => eprintln!("kitt-memoryd accept error: {error}"),
         }

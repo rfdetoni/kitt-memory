@@ -91,7 +91,7 @@ impl SqliteMemoryStore {
     }
 
     pub fn touch_records(&self, ids: &[String]) -> Result<()> {
-        self.touch_access(ids.iter().map(String::as_str))
+        self.touch_memories(ids).map(|_| ())
     }
 
     pub fn archive_workspace(
@@ -166,8 +166,35 @@ impl SqliteMemoryStore {
         Ok(())
     }
 
-    pub fn maintenance(&self, namespace: &str, workspace_id: &str) -> Result<(usize, usize)> {
+    pub fn periodic_maintenance(&self) -> Result<usize> {
+        self.flush_recall_traces()?;
         let expired = self.prune_expired()?;
+        let cutoff = now_epoch().saturating_sub(30 * 24 * 3600);
+        let conn = self.writer_conn()?;
+        conn.execute(
+            "DELETE FROM memory_consumption_receipts WHERE consumed_at < ?1",
+            [cutoff],
+        )
+        .map_err(storage)?;
+        conn.execute("DELETE FROM recall_traces WHERE created_at < ?1", [cutoff])
+            .map_err(storage)?;
+        conn.execute(
+            "DELETE FROM memory_jobs
+             WHERE status IN ('SUCCEEDED','FAILED') AND updated_at < ?1",
+            [cutoff],
+        )
+        .map_err(storage)?;
+        conn.execute_batch(
+            "INSERT INTO memories_fts(memories_fts) VALUES('optimize');
+             PRAGMA optimize;
+             PRAGMA wal_checkpoint(PASSIVE);",
+        )
+        .map_err(storage)?;
+        Ok(expired)
+    }
+
+    pub fn maintenance(&self, namespace: &str, workspace_id: &str) -> Result<(usize, usize)> {
+        let expired = self.periodic_maintenance()?;
         let duplicates = self.consolidate_exact_duplicates(namespace, workspace_id)?;
         Ok((expired, duplicates))
     }

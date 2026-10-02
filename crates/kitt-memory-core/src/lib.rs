@@ -20,7 +20,8 @@ pub use knowledge::{
 };
 pub use ranking::{
     MergeAssessment, MergeCandidate, MergeDisposition, SemanticReranker, SemanticScore,
-    assess_merge_candidate, lexical_similarity, retention_score,
+    assess_merge_candidate, lexical_similarity, lexical_similarity_with_terms, lexical_terms,
+    retention_score,
 };
 pub use semantic::{
     ContextNode, DreamRunRecord, MemoryChange, MemoryChangeSet, MemorySchemaDefinition,
@@ -235,6 +236,10 @@ pub struct MemoryRecord {
     pub supersedes_id: Option<String>,
     pub content_hash: String,
     pub pinned: bool,
+    #[serde(default, skip_serializing)]
+    pub gist: String,
+    #[serde(default, skip_serializing)]
+    pub tokens_est: usize,
     pub metadata_json: String,
 }
 
@@ -288,6 +293,8 @@ impl MemoryRecord {
         }
         record.normalized_content = normalize(&record.content);
         record.content_hash = hash_normalized(&record.normalized_content);
+        record.gist = gist_for_content(&record.content, 180);
+        record.tokens_est = estimate_tokens(&record.content);
         Ok(record)
     }
 }
@@ -335,6 +342,8 @@ impl NewMemory {
             supersedes_id: None,
             content_hash: String::new(),
             pinned: self.pinned,
+            gist: String::new(),
+            tokens_est: 0,
             metadata_json: self.metadata_json,
         }
         .canonicalized_for_storage()
@@ -410,10 +419,28 @@ impl EgressPolicy {
     }
 }
 
+fn fold_latin_diacritic(ch: char) -> char {
+    match ch {
+        'á' | 'à' | 'â' | 'ã' | 'ä' | 'å' => 'a',
+        'é' | 'è' | 'ê' | 'ë' => 'e',
+        'í' | 'ì' | 'î' | 'ï' => 'i',
+        'ó' | 'ò' | 'ô' | 'õ' | 'ö' => 'o',
+        'ú' | 'ù' | 'û' | 'ü' => 'u',
+        'ç' => 'c',
+        'ñ' => 'n',
+        'ý' | 'ÿ' => 'y',
+        other => other,
+    }
+}
+
 pub fn normalize(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let mut separator = false;
-    for ch in value.chars().flat_map(char::to_lowercase) {
+    for ch in value
+        .chars()
+        .flat_map(char::to_lowercase)
+        .map(fold_latin_diacritic)
+    {
         if ch.is_alphanumeric() || ch == '_' || ch == '-' {
             out.push(ch);
             separator = false;
@@ -423,6 +450,56 @@ pub fn normalize(value: &str) -> String {
         }
     }
     out.trim().to_string()
+}
+
+/// Stable, allocation-free token estimate used by every budgeted memory surface.
+///
+/// The estimator intentionally errs slightly high for non-ASCII text and code-like
+/// punctuation so budgets remain conservative without binding the memory daemon to a
+/// specific model tokenizer.
+pub fn estimate_tokens(value: &str) -> usize {
+    if value.is_empty() {
+        return 0;
+    }
+    let mut ascii = 0usize;
+    let mut non_ascii = 0usize;
+    let mut punctuation = 0usize;
+    for ch in value.chars() {
+        if ch.is_ascii() {
+            ascii = ascii.saturating_add(1);
+            if ch.is_ascii_punctuation() {
+                punctuation = punctuation.saturating_add(1);
+            }
+        } else {
+            non_ascii = non_ascii.saturating_add(1);
+        }
+    }
+    ascii
+        .div_ceil(4)
+        .saturating_add(non_ascii.saturating_mul(2))
+        .saturating_add(punctuation.div_ceil(12))
+}
+
+/// Produces a compact, deterministic gist at a sentence/line boundary.
+pub fn gist_for_content(value: &str, max_chars: usize) -> String {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let hard = trimmed
+        .char_indices()
+        .nth(max_chars.saturating_sub(1))
+        .map(|(index, _)| index)
+        .unwrap_or(trimmed.len());
+    let prefix = &trimmed[..hard];
+    let boundary = prefix
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| matches!(ch, '.' | '!' | '?' | '\n'))
+        .map(|(index, ch)| index + ch.len_utf8())
+        .filter(|index| *index >= hard / 2)
+        .unwrap_or(hard);
+    format!("{}…", prefix[..boundary].trim_end())
 }
 
 fn validate_identity(namespace: &str, workspace_id: &str) -> Result<()> {
@@ -488,6 +565,13 @@ mod tests {
     #[test]
     fn normalization_is_stable() {
         assert_eq!("hello world", normalize("  Hello   WORLD "));
+        assert_eq!("acao configuracao", normalize("Ação configuração"));
+    }
+
+    #[test]
+    fn token_estimate_is_stable_and_unicode_aware() {
+        assert_eq!(1, estimate_tokens("abc"));
+        assert!(estimate_tokens("ação") >= estimate_tokens("acao"));
     }
 
     #[test]

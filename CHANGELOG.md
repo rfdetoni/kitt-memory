@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.0 — 2026-10-02
+
+- Advance SQLite to schema v9 with normalized-content FTS5, derived `gist` / `tokens_est` fields and collision-safe rehash/dedup migration.
+- Make search/recall side-effect free; access counters now move only on explicit hydration or positive consumption evidence.
+- Add deterministic baseline revisions and ETags plus `memory.baseline.request` / `if_none_match` support.
+- Reuse bounded SQLite reader connections, buffer recall traces off the hot path and add periodic trace/job cleanup, FTS optimization and passive WAL checkpoints.
+- Gate bounded semantic reranking by lexical ambiguity and restrict salience fallback to sparse/empty lexical result sets.
+- Add optional progressive controls for provenance omission and excluded IDs while preserving all protocol-v1 response fields.
+- Replace thread-per-connection serving with a fixed worker pool, bounded queue, keep-alive loops and constant-time auth-token comparison.
+- Add v8→v9 migration, side-effect-free search, baseline revision and concurrency characterization coverage plus a dependency-free latency benchmark.
+- Keep MSRV at Rust 1.88 and enable release LTO/single codegen unit/symbol stripping.
+
 ## 0.8.1 — 2026-10-02
 
 - Keep bounded connection admission compatible with Rust 1.88 and current stable Clippy using compare_exchange rather than deprecated fetch_update.

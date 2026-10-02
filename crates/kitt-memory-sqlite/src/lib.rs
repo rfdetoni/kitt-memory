@@ -4,11 +4,13 @@ use kitt_memory_core::{
     MemorySchemaDefinition, MemoryScope, MemorySource, MemoryStatus, MemoryStore, MergeCandidate,
     MergeDisposition, NewConcept, NewContextNode, NewCorrection, NewMemory, NewMemorySource,
     RecallQuery, RecallTrace, Result, SemanticMemoryStore, SemanticReranker, Sensitivity,
-    StoredConcept, assess_merge_candidate, build_memory_baseline, now_epoch,
+    StoredConcept, assess_merge_candidate, build_memory_baseline, estimate_tokens,
+    gist_for_content, hash_normalized, lexical_similarity_with_terms, lexical_terms, normalize,
+    now_epoch,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, types::Type};
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
     sync::Mutex,
@@ -24,8 +26,8 @@ mod semantic;
 
 pub use semantic::TimelineMemoryQuery;
 
-const STORE_SCHEMA_VERSION: i64 = 8;
-const MEMORY_COLUMNS: &str = "m.id,m.namespace,m.workspace_id,m.kind,m.content,m.normalized_content,m.status,m.sensitivity,m.scope,m.scope_key,m.importance,m.confidence,m.created_at,m.updated_at,m.last_accessed_at,m.access_count,m.valid_from,m.valid_until,m.supersedes_id,m.content_hash,m.pinned,m.metadata_json";
+const STORE_SCHEMA_VERSION: i64 = 9;
+const MEMORY_COLUMNS: &str = "m.id,m.namespace,m.workspace_id,m.kind,m.content,m.normalized_content,m.status,m.sensitivity,m.scope,m.scope_key,m.importance,m.confidence,m.created_at,m.updated_at,m.last_accessed_at,m.access_count,m.valid_from,m.valid_until,m.supersedes_id,m.content_hash,m.pinned,m.metadata_json,m.gist,m.tokens_est";
 
 fn ensure_private_database_file(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
@@ -69,6 +71,8 @@ pub enum RequestReceipt {
 pub struct SqliteMemoryStore {
     path: PathBuf,
     writer: Mutex<Connection>,
+    readers: Mutex<Vec<Connection>>,
+    trace_buffer: Mutex<VecDeque<RecallTrace>>,
 }
 
 impl SqliteMemoryStore {
@@ -79,9 +83,15 @@ impl SqliteMemoryStore {
         }
         ensure_private_database_file(&path)?;
         let writer = Self::open_connection(&path)?;
+        let mut readers = Vec::with_capacity(4);
+        for _ in 0..4 {
+            readers.push(Self::open_connection(&path)?);
+        }
         let store = Self {
             path,
             writer: Mutex::new(writer),
+            readers: Mutex::new(readers),
+            trace_buffer: Mutex::new(VecDeque::with_capacity(256)),
         };
         {
             let mut conn = store.writer_conn()?;
@@ -172,11 +182,32 @@ impl SqliteMemoryStore {
             .map_err(storage)?;
         conn.pragma_update(None, "secure_delete", "ON")
             .map_err(storage)?;
+        conn.pragma_update(None, "cache_size", -8_192_i64)
+            .map_err(storage)?;
+        conn.pragma_update(None, "temp_store", "MEMORY")
+            .map_err(storage)?;
+        conn.pragma_update(None, "mmap_size", 67_108_864_i64)
+            .map_err(storage)?;
+        conn.pragma_update(None, "wal_autocheckpoint", 1_000_i64)
+            .map_err(storage)?;
         Ok(conn)
     }
 
     fn conn(&self) -> Result<Connection> {
-        Self::open_connection(&self.path)
+        self.readers
+            .lock()
+            .map_err(|_| MemoryError::Storage("memory reader pool lock poisoned".into()))?
+            .pop()
+            .map(Ok)
+            .unwrap_or_else(|| Self::open_connection(&self.path))
+    }
+
+    fn return_conn(&self, conn: Connection) {
+        if let Ok(mut readers) = self.readers.lock()
+            && readers.len() < 8
+        {
+            readers.push(conn);
+        }
     }
 
     fn writer_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
@@ -190,7 +221,9 @@ impl SqliteMemoryStore {
         f: impl FnOnce(&Connection) -> std::result::Result<T, rusqlite::Error>,
     ) -> Result<T> {
         let conn = self.conn()?;
-        f(&conn).map_err(storage)
+        let result = f(&conn).map_err(storage);
+        self.return_conn(conn);
+        result
     }
 
     fn load_recall_candidates(
@@ -208,108 +241,140 @@ impl SqliteMemoryStore {
             Vec::new()
         } else {
             self.with_conn(|conn| {
-                let sql = format!("SELECT {MEMORY_COLUMNS},bm25(memories_fts) FROM memories_fts JOIN memories m ON m.rowid=memories_fts.rowid WHERE memories_fts MATCH ?1 AND m.namespace=?2 AND (m.scope='global' OR (m.workspace_id=?3 AND m.scope='workspace') OR (m.workspace_id=?3 AND m.scope='conversation' AND m.scope_key=?4)) AND m.status='ACTIVE' AND (m.valid_from IS NULL OR m.valid_from<=?5) AND (m.valid_until IS NULL OR m.valid_until>?5) AND m.sensitivity<>'ephemeral' AND (m.sensitivity<>'private' OR ?6=1) AND (m.sensitivity<>'secret' OR ?7=1) ORDER BY bm25(memories_fts) ASC LIMIT ?8");
+                let sql = format!("SELECT {MEMORY_COLUMNS},bm25(memories_fts,0.0,0.0,1.0) FROM memories_fts JOIN memories m ON m.rowid=memories_fts.rowid WHERE memories_fts MATCH ?1 AND m.namespace=?2 AND (m.scope='global' OR (m.workspace_id=?3 AND m.scope='workspace') OR (m.workspace_id=?3 AND m.scope='conversation' AND m.scope_key=?4)) AND m.status='ACTIVE' AND (m.valid_from IS NULL OR m.valid_from<=?5) AND (m.valid_until IS NULL OR m.valid_until>?5) AND m.sensitivity<>'ephemeral' AND (m.sensitivity<>'private' OR ?6=1) AND (m.sensitivity<>'secret' OR ?7=1) ORDER BY bm25(memories_fts,0.0,0.0,1.0) ASC LIMIT ?8");
                 let mut stmt=conn.prepare(&sql)?;
-                stmt.query_map(params![fts,query.namespace,query.workspace_id,scope_key,at,query.allow_private as i64,query.allow_secret as i64,cap as i64],|row| Ok((map_memory_row(row)?,row.get::<_,f64>(22)? as f32)))?.collect::<std::result::Result<Vec<_>,_>>()
+                stmt.query_map(params![fts,query.namespace,query.workspace_id,scope_key,at,query.allow_private as i64,query.allow_secret as i64,cap as i64],|row| Ok((map_memory_row(row)?,row.get::<_,f64>(24)? as f32)))?.collect::<std::result::Result<Vec<_>,_>>()
             })?
         };
-        let fallback=self.with_conn(|conn|{
-            let sql=format!("SELECT {MEMORY_COLUMNS},0.0 FROM memories m WHERE m.namespace=?1 AND (m.scope='global' OR (m.workspace_id=?2 AND m.scope='workspace') OR (m.workspace_id=?2 AND m.scope='conversation' AND m.scope_key=?3)) AND m.status='ACTIVE' AND (m.valid_from IS NULL OR m.valid_from<=?4) AND (m.valid_until IS NULL OR m.valid_until>?4) AND m.sensitivity<>'ephemeral' AND (m.sensitivity<>'private' OR ?5=1) AND (m.sensitivity<>'secret' OR ?6=1) ORDER BY m.pinned DESC,m.importance DESC,m.updated_at DESC LIMIT ?7");
-            let mut stmt=conn.prepare(&sql)?;
-            stmt.query_map(params![query.namespace,query.workspace_id,scope_key,at,query.allow_private as i64,query.allow_secret as i64,cap.clamp(1,32) as i64],|row| Ok((map_memory_row(row)?,row.get::<_,f64>(22)? as f32)))?.collect::<std::result::Result<Vec<_>,_>>()
-        })?;
-        let mut seen = rows
-            .iter()
-            .map(|(m, _)| m.id.clone())
-            .collect::<HashSet<_>>();
-        for candidate in fallback {
-            if seen.insert(candidate.0.id.clone()) {
-                rows.push(candidate);
+        let limit = query.limit.min(50);
+        if query.text.trim().is_empty() || rows.len() < limit.min(4) {
+            let terms = lexical_terms(&query.text);
+            let fallback=self.with_conn(|conn|{
+                let sql=format!("SELECT {MEMORY_COLUMNS},0.0 FROM memories m WHERE m.namespace=?1 AND (m.scope='global' OR (m.workspace_id=?2 AND m.scope='workspace') OR (m.workspace_id=?2 AND m.scope='conversation' AND m.scope_key=?3)) AND m.status='ACTIVE' AND (m.valid_from IS NULL OR m.valid_from<=?4) AND (m.valid_until IS NULL OR m.valid_until>?4) AND m.sensitivity<>'ephemeral' AND (m.sensitivity<>'private' OR ?5=1) AND (m.sensitivity<>'secret' OR ?6=1) ORDER BY m.pinned DESC,m.importance DESC,m.updated_at DESC LIMIT ?7");
+                let mut stmt=conn.prepare(&sql)?;
+                stmt.query_map(params![query.namespace,query.workspace_id,scope_key,at,query.allow_private as i64,query.allow_secret as i64,cap.clamp(1,16) as i64],|row| Ok((map_memory_row(row)?,row.get::<_,f64>(24)? as f32)))?.collect::<std::result::Result<Vec<_>,_>>()
+            })?;
+            let mut seen = rows
+                .iter()
+                .map(|(m, _)| m.id.clone())
+                .collect::<HashSet<_>>();
+            for candidate in fallback {
+                let lexical = lexical_similarity_with_terms(&terms, &candidate.0);
+                if (query.text.trim().is_empty() || lexical >= 0.05)
+                    && seen.insert(candidate.0.id.clone())
+                {
+                    rows.push(candidate);
+                }
             }
         }
-        rows.truncate(cap.saturating_add(cap.clamp(1, 32)));
+        rows.truncate(cap.saturating_add(limit.min(16)));
         Ok(rows)
+    }
+
+    fn baseline_revision(&self, query: &BaselineQuery) -> Result<u64> {
+        let scope_key = query.scope_key.as_deref().unwrap_or("");
+        self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT COALESCE(SUM(revision),0) FROM baseline_revisions
+                 WHERE namespace=?1 AND workspace_id IN ('global',?2)
+                   AND scope_key IN ('',?3)",
+                params![query.namespace, query.workspace_id, scope_key],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .and_then(|value| {
+            u64::try_from(value)
+                .map_err(|_| MemoryError::Corrupt("negative baseline revision".into()))
+        })
     }
 
     fn ranked_recall(
         &self,
         query: &RecallQuery,
         reranker: Option<&dyn SemanticReranker>,
-        touch: bool,
     ) -> Result<Vec<MemoryRecord>> {
         if query.limit == 0 {
             return Ok(Vec::new());
         }
         let limit = query.limit.min(50);
-        let cap = (limit.saturating_mul(12)).clamp(64, 256);
+        let cap = (limit.saturating_mul(4)).clamp(16, 128);
         let candidates = self.load_recall_candidates(query, cap)?;
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
+        let terms = lexical_terms(&query.text);
         let records = candidates
             .iter()
+            .take(30)
             .map(|(m, _)| m.clone())
             .collect::<Vec<_>>();
         let ids = records
             .iter()
             .map(|m| m.id.as_str())
             .collect::<HashSet<_>>();
-        let semantic_scores = reranker
-            .and_then(|r| r.score(&query.text, &records).ok())
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|x| x.score.is_finite() && ids.contains(x.memory_id.as_str()))
-            .map(|x| (x.memory_id, x.score.clamp(0.0, 1.0)))
-            .collect::<HashMap<_, _>>();
+        let mut lexical_confidence = candidates
+            .iter()
+            .take(8)
+            .map(|(memory, _)| lexical_similarity_with_terms(&terms, memory))
+            .collect::<Vec<_>>();
+        lexical_confidence.sort_by(|left, right| right.total_cmp(left));
+        let first_lexical = lexical_confidence.first().copied().unwrap_or(0.0);
+        let second_lexical = lexical_confidence.get(1).copied().unwrap_or(0.0);
+        let lexical_margin_high = first_lexical >= 0.45 && first_lexical - second_lexical >= 0.20;
+        let semantic_scores = if lexical_margin_high {
+            HashMap::new()
+        } else {
+            reranker
+                .and_then(|r| r.score(&query.text, &records).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|x| x.score.is_finite() && ids.contains(x.memory_id.as_str()))
+                .map(|x| (x.memory_id, x.score.clamp(0.0, 1.0)))
+                .collect::<HashMap<_, _>>()
+        };
         let now = query.as_of.unwrap_or_else(now_epoch);
         let semantic_enabled = !semantic_scores.is_empty();
         let mut ranked = candidates
             .into_iter()
             .enumerate()
-            .map(|(index, (memory, _))| {
-                let lexical = kitt_memory_core::lexical_similarity(&query.text, &memory);
+            .map(|(index, (memory, bm25))| {
+                let lexical = lexical_similarity_with_terms(&terms, &memory);
+                let fts_score = if bm25 == 0.0 {
+                    0.0
+                } else {
+                    let relevance = (-bm25).max(0.0);
+                    relevance / (1.0 + relevance)
+                };
                 let retained = kitt_memory_core::retention_score(&memory, now).min(1.25);
                 let rr = 60.0 / (61.0 + index as f32);
                 let semantic = semantic_scores.get(&memory.id).copied().unwrap_or(0.0);
-                let score = if semantic_enabled {
-                    lexical * 0.30 + semantic * 0.35 + retained * 0.20 + rr * 0.15
+                let score = if query.text.trim().is_empty() {
+                    retained
+                } else if semantic_enabled {
+                    fts_score * 0.32
+                        + lexical * 0.18
+                        + semantic * 0.32
+                        + retained * 0.10
+                        + rr * 0.08
                 } else {
-                    lexical * 0.48 + retained * 0.32 + rr * 0.20
+                    fts_score * 0.50 + lexical * 0.24 + retained * 0.16 + rr * 0.10
                 };
                 (score, memory)
             })
             .collect::<Vec<_>>();
         ranked.sort_by(|l, r| r.0.total_cmp(&l.0).then_with(|| l.1.id.cmp(&r.1.id)));
-        let selected = ranked
+        let top = ranked.first().map(|item| item.0).unwrap_or(0.0);
+        let threshold = if query.text.trim().is_empty() {
+            0.0
+        } else {
+            top * 0.30
+        };
+        Ok(ranked
             .into_iter()
+            .filter(|(score, _)| *score >= threshold)
             .take(limit)
             .map(|(_, m)| m)
-            .collect::<Vec<_>>();
-        if touch && !selected.is_empty() && query.as_of.is_none() {
-            self.touch_access(selected.iter().map(|m| m.id.as_str()))?;
-        }
-        Ok(selected)
-    }
-
-    fn touch_access<'a>(&self, ids: impl Iterator<Item = &'a str>) -> Result<()> {
-        let ids = ids.map(str::to_owned).collect::<Vec<_>>();
-        if ids.is_empty() {
-            return Ok(());
-        }
-        let placeholders = (0..ids.len())
-            .map(|index| format!("?{}", index + 2))
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "UPDATE memories SET last_accessed_at=?1,access_count=access_count+1              WHERE id IN ({placeholders})"
-        );
-        let mut values = Vec::<rusqlite::types::Value>::with_capacity(ids.len() + 1);
-        values.push(now_epoch().into());
-        values.extend(ids.into_iter().map(rusqlite::types::Value::from));
-        let conn = self.writer_conn()?;
-        conn.execute(&sql, rusqlite::params_from_iter(values))
-            .map_err(storage)?;
-        Ok(())
+            .collect())
     }
 }
 
@@ -383,7 +448,7 @@ impl MemoryStore for SqliteMemoryStore {
     }
 
     fn recall(&self, query: &RecallQuery) -> Result<Vec<MemoryRecord>> {
-        self.ranked_recall(query, None, true)
+        self.ranked_recall(query, None)
     }
 
     fn recall_with_reranker(
@@ -391,7 +456,7 @@ impl MemoryStore for SqliteMemoryStore {
         query: &RecallQuery,
         reranker: &dyn SemanticReranker,
     ) -> Result<Vec<MemoryRecord>> {
-        self.ranked_recall(query, Some(reranker), true)
+        self.ranked_recall(query, Some(reranker))
     }
 
     fn baseline(&self, query: &BaselineQuery) -> Result<MemoryBaseline> {
@@ -407,7 +472,19 @@ impl MemoryStore for SqliteMemoryStore {
             stmt.query_map(params![query.namespace, query.workspace_id, scope_key, at, query.allow_private as i64, query.allow_secret as i64], map_memory_row)?
                 .collect::<std::result::Result<Vec<_>, _>>()
         })?;
-        Ok(build_memory_baseline(records, query))
+        let mut baseline = build_memory_baseline(records, query);
+        let revision = self.baseline_revision(query)?;
+        baseline.baseline_revision = Some(revision);
+        baseline.etag = Some(hash_normalized(&format!(
+            "{}|{}|{}|{}|{}|{}",
+            query.namespace,
+            query.workspace_id,
+            query.scope_key.as_deref().unwrap_or(""),
+            revision,
+            query.allow_private,
+            query.allow_secret
+        )));
+        Ok(baseline)
     }
 
     fn find_merge_candidates(
@@ -897,11 +974,8 @@ impl KnowledgeStore for SqliteMemoryStore {
 }
 
 fn fts_query(input: &str) -> String {
-    let mut terms = input
-        .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-')
-        .map(str::trim)
-        .filter(|term| term.chars().count() >= 2)
-        .take(16)
+    let mut terms = lexical_terms(input)
+        .into_iter()
         .map(|term| format!("\"{}\"", term.replace('"', "")))
         .collect::<Vec<_>>();
     terms.sort();
@@ -922,7 +996,7 @@ fn find_identity_id(conn: &Connection, memory: &MemoryRecord) -> Result<Option<S
     conn.query_row("SELECT id FROM memories WHERE namespace=?1 AND workspace_id=?2 AND scope=?3 AND COALESCE(scope_key,'')=COALESCE(?4,'') AND kind=?5 AND content_hash=?6 AND status='ACTIVE' LIMIT 1",params![memory.namespace,memory.workspace_id,memory.scope.as_db(),memory.scope_key,memory.kind.as_db(),memory.content_hash],|row|row.get(0)).optional().map_err(storage)
 }
 fn upsert_record_tx(conn: &Connection, memory: &MemoryRecord) -> Result<()> {
-    conn.execute("INSERT INTO memories(id,namespace,workspace_id,kind,content,normalized_content,status,sensitivity,scope,scope_key,importance,confidence,created_at,updated_at,last_accessed_at,access_count,valid_from,valid_until,supersedes_id,content_hash,pinned,metadata_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22) ON CONFLICT(id) DO UPDATE SET namespace=excluded.namespace,workspace_id=excluded.workspace_id,kind=excluded.kind,content=excluded.content,normalized_content=excluded.normalized_content,status=excluded.status,sensitivity=CASE WHEN (CASE memories.sensitivity WHEN 'public' THEN 0 WHEN 'personal' THEN 1 WHEN 'private' THEN 2 WHEN 'secret' THEN 3 ELSE 4 END)>=(CASE excluded.sensitivity WHEN 'public' THEN 0 WHEN 'personal' THEN 1 WHEN 'private' THEN 2 WHEN 'secret' THEN 3 ELSE 4 END) THEN memories.sensitivity ELSE excluded.sensitivity END,scope=excluded.scope,scope_key=excluded.scope_key,importance=excluded.importance,confidence=excluded.confidence,updated_at=excluded.updated_at,last_accessed_at=excluded.last_accessed_at,access_count=excluded.access_count,valid_from=excluded.valid_from,valid_until=excluded.valid_until,supersedes_id=excluded.supersedes_id,content_hash=excluded.content_hash,pinned=excluded.pinned,metadata_json=excluded.metadata_json",params![memory.id,memory.namespace,memory.workspace_id,memory.kind.as_db(),memory.content,memory.normalized_content,memory.status.as_db(),memory.sensitivity.as_db(),memory.scope.as_db(),memory.scope_key,memory.importance,memory.confidence,memory.created_at,memory.updated_at,memory.last_accessed_at,memory.access_count as i64,memory.valid_from,memory.valid_until,memory.supersedes_id,memory.content_hash,memory.pinned as i64,memory.metadata_json]).map_err(storage)?;
+    conn.execute("INSERT INTO memories(id,namespace,workspace_id,kind,content,normalized_content,status,sensitivity,scope,scope_key,importance,confidence,created_at,updated_at,last_accessed_at,access_count,valid_from,valid_until,supersedes_id,content_hash,pinned,metadata_json,gist,tokens_est) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24) ON CONFLICT(id) DO UPDATE SET namespace=excluded.namespace,workspace_id=excluded.workspace_id,kind=excluded.kind,content=excluded.content,normalized_content=excluded.normalized_content,status=excluded.status,sensitivity=CASE WHEN (CASE memories.sensitivity WHEN 'public' THEN 0 WHEN 'personal' THEN 1 WHEN 'private' THEN 2 WHEN 'secret' THEN 3 ELSE 4 END)>=(CASE excluded.sensitivity WHEN 'public' THEN 0 WHEN 'personal' THEN 1 WHEN 'private' THEN 2 WHEN 'secret' THEN 3 ELSE 4 END) THEN memories.sensitivity ELSE excluded.sensitivity END,scope=excluded.scope,scope_key=excluded.scope_key,importance=excluded.importance,confidence=excluded.confidence,updated_at=excluded.updated_at,last_accessed_at=excluded.last_accessed_at,access_count=excluded.access_count,valid_from=excluded.valid_from,valid_until=excluded.valid_until,supersedes_id=excluded.supersedes_id,content_hash=excluded.content_hash,pinned=excluded.pinned,metadata_json=excluded.metadata_json,gist=excluded.gist,tokens_est=excluded.tokens_est",params![memory.id,memory.namespace,memory.workspace_id,memory.kind.as_db(),memory.content,memory.normalized_content,memory.status.as_db(),memory.sensitivity.as_db(),memory.scope.as_db(),memory.scope_key,memory.importance,memory.confidence,memory.created_at,memory.updated_at,memory.last_accessed_at,memory.access_count as i64,memory.valid_from,memory.valid_until,memory.supersedes_id,memory.content_hash,memory.pinned as i64,memory.metadata_json,memory.gist,memory.tokens_est as i64]).map_err(storage)?;
     Ok(())
 }
 
@@ -931,7 +1005,7 @@ fn insert_record(
     memory: &MemoryRecord,
 ) -> std::result::Result<usize, rusqlite::Error> {
     conn.execute(
-        "INSERT INTO memories(id,namespace,workspace_id,kind,content,normalized_content,status,sensitivity,scope,scope_key,importance,confidence,created_at,updated_at,last_accessed_at,access_count,valid_from,valid_until,supersedes_id,content_hash,pinned,metadata_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
+        "INSERT INTO memories(id,namespace,workspace_id,kind,content,normalized_content,status,sensitivity,scope,scope_key,importance,confidence,created_at,updated_at,last_accessed_at,access_count,valid_from,valid_until,supersedes_id,content_hash,pinned,metadata_json,gist,tokens_est) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)",
         params![
             memory.id,
             memory.namespace,
@@ -954,7 +1028,9 @@ fn insert_record(
             memory.supersedes_id,
             memory.content_hash,
             memory.pinned as i64,
-            memory.metadata_json
+            memory.metadata_json,
+            memory.gist,
+            memory.tokens_est as i64
         ],
     )
 }
@@ -990,6 +1066,17 @@ fn map_memory_row(row: &rusqlite::Row<'_>) -> std::result::Result<MemoryRecord, 
         content_hash: row.get(19)?,
         pinned: row.get::<_, i64>(20)? != 0,
         metadata_json: row.get(21)?,
+        gist: row.get(22)?,
+        tokens_est: {
+            let value = row.get::<_, i64>(23)?;
+            if value < 0 {
+                return Err(data_error(
+                    23,
+                    MemoryError::Corrupt("negative tokens_est".into()),
+                ));
+            }
+            value as usize
+        },
     })
 }
 fn data_error(i: usize, e: MemoryError) -> rusqlite::Error {
@@ -1084,8 +1171,8 @@ fn migrate(conn: &mut Connection) -> std::result::Result<(), rusqlite::Error> {
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     tx.execute_batch(r#"CREATE TABLE IF NOT EXISTS schema_info(version INTEGER NOT NULL);INSERT INTO schema_info(version) SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM schema_info);
- CREATE TABLE IF NOT EXISTS memories(id TEXT PRIMARY KEY,namespace TEXT NOT NULL,workspace_id TEXT NOT NULL,kind TEXT NOT NULL,content TEXT NOT NULL,normalized_content TEXT NOT NULL,status TEXT NOT NULL,sensitivity TEXT NOT NULL,scope TEXT NOT NULL,scope_key TEXT,importance REAL NOT NULL,confidence REAL NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,last_accessed_at INTEGER,access_count INTEGER NOT NULL DEFAULT 0,valid_from INTEGER,valid_until INTEGER,supersedes_id TEXT,content_hash TEXT NOT NULL,pinned INTEGER NOT NULL DEFAULT 0,metadata_json TEXT NOT NULL DEFAULT '{}');
- CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(id UNINDEXED,namespace UNINDEXED,workspace_id UNINDEXED,content,normalized_content,tokenize='unicode61');
+ CREATE TABLE IF NOT EXISTS memories(id TEXT PRIMARY KEY,namespace TEXT NOT NULL,workspace_id TEXT NOT NULL,kind TEXT NOT NULL,content TEXT NOT NULL,normalized_content TEXT NOT NULL,status TEXT NOT NULL,sensitivity TEXT NOT NULL,scope TEXT NOT NULL,scope_key TEXT,importance REAL NOT NULL,confidence REAL NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,last_accessed_at INTEGER,access_count INTEGER NOT NULL DEFAULT 0,valid_from INTEGER,valid_until INTEGER,supersedes_id TEXT,content_hash TEXT NOT NULL,pinned INTEGER NOT NULL DEFAULT 0,metadata_json TEXT NOT NULL DEFAULT '{}',gist TEXT NOT NULL DEFAULT '',tokens_est INTEGER NOT NULL DEFAULT 0);
+ CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(id UNINDEXED,namespace UNINDEXED,workspace_id UNINDEXED,normalized_content,tokenize='unicode61 remove_diacritics 2');
  CREATE TABLE IF NOT EXISTS corrections(id TEXT PRIMARY KEY,namespace TEXT NOT NULL,workspace_id TEXT NOT NULL,context TEXT NOT NULL,predicted TEXT NOT NULL,corrected TEXT NOT NULL,reason TEXT,source TEXT NOT NULL,sensitivity TEXT NOT NULL DEFAULT 'private',source_memory_ids_json TEXT NOT NULL DEFAULT '[]',applied_count INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
  CREATE VIRTUAL TABLE IF NOT EXISTS corrections_fts USING fts5(id UNINDEXED,context,predicted,corrected,reason,tokenize='unicode61');
  CREATE TABLE IF NOT EXISTS concepts(id TEXT PRIMARY KEY,namespace TEXT NOT NULL,workspace_id TEXT NOT NULL,name TEXT NOT NULL,definition TEXT NOT NULL,confidence REAL NOT NULL,sensitivity TEXT NOT NULL DEFAULT 'private',revision INTEGER NOT NULL DEFAULT 1,labels_json TEXT NOT NULL DEFAULT '[]',source_memory_ids_json TEXT NOT NULL DEFAULT '[]',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(namespace,workspace_id,name));
@@ -1109,7 +1196,7 @@ fn migrate(conn: &mut Connection) -> std::result::Result<(), rusqlite::Error> {
         return Err(rusqlite::Error::InvalidQuery);
     }
     if current < 2 {
-        tx.execute_batch(r#"DELETE FROM memories_fts;INSERT INTO memories_fts(rowid,id,namespace,workspace_id,content,normalized_content) SELECT rowid,id,namespace,workspace_id,content,normalized_content FROM memories;DELETE FROM corrections_fts;INSERT INTO corrections_fts(rowid,id,context,predicted,corrected,reason) SELECT rowid,id,context,predicted,corrected,COALESCE(reason,'') FROM corrections;DELETE FROM concepts_fts;INSERT INTO concepts_fts(rowid,id,name,definition,labels) SELECT rowid,id,name,definition,labels_json FROM concepts;"#)?;
+        tx.execute_batch(r#"DELETE FROM memories_fts;INSERT INTO memories_fts(rowid,id,namespace,workspace_id,normalized_content) SELECT rowid,id,namespace,workspace_id,normalized_content FROM memories;DELETE FROM corrections_fts;INSERT INTO corrections_fts(rowid,id,context,predicted,corrected,reason) SELECT rowid,id,context,predicted,corrected,COALESCE(reason,'') FROM corrections;DELETE FROM concepts_fts;INSERT INTO concepts_fts(rowid,id,name,definition,labels) SELECT rowid,id,name,definition,labels_json FROM concepts;"#)?;
     }
     if current < 3 {
         if !table_has_column(&tx, "memories", "valid_from")? {
@@ -1154,9 +1241,9 @@ fn migrate(conn: &mut Connection) -> std::result::Result<(), rusqlite::Error> {
  CREATE INDEX IF NOT EXISTS idx_memory_jobs_claim ON memory_jobs(phase,status,next_retry_at,lease_until,created_at);
  CREATE INDEX IF NOT EXISTS idx_corrections_scope ON corrections(namespace,workspace_id,applied_count,updated_at);CREATE INDEX IF NOT EXISTS idx_concepts_scope ON concepts(namespace,workspace_id,confidence,updated_at);CREATE INDEX IF NOT EXISTS idx_concept_links_source ON concept_links(namespace,workspace_id,source_id);CREATE INDEX IF NOT EXISTS idx_concept_links_target ON concept_links(namespace,workspace_id,target_id);
  DROP TRIGGER IF EXISTS memories_fts_insert;DROP TRIGGER IF EXISTS memories_fts_delete;DROP TRIGGER IF EXISTS memories_fts_update;
- CREATE TRIGGER memories_fts_insert AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(rowid,id,namespace,workspace_id,content,normalized_content) VALUES(new.rowid,new.id,new.namespace,new.workspace_id,new.content,new.normalized_content);END;
+ CREATE TRIGGER memories_fts_insert AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(rowid,id,namespace,workspace_id,normalized_content) VALUES(new.rowid,new.id,new.namespace,new.workspace_id,new.normalized_content);END;
  CREATE TRIGGER memories_fts_delete AFTER DELETE ON memories BEGIN DELETE FROM memories_fts WHERE rowid=old.rowid;END;
- CREATE TRIGGER memories_fts_update AFTER UPDATE OF content,normalized_content ON memories BEGIN DELETE FROM memories_fts WHERE rowid=old.rowid;INSERT INTO memories_fts(rowid,id,namespace,workspace_id,content,normalized_content) VALUES(new.rowid,new.id,new.namespace,new.workspace_id,new.content,new.normalized_content);END;
+ CREATE TRIGGER memories_fts_update AFTER UPDATE OF normalized_content ON memories BEGIN DELETE FROM memories_fts WHERE rowid=old.rowid;INSERT INTO memories_fts(rowid,id,namespace,workspace_id,normalized_content) VALUES(new.rowid,new.id,new.namespace,new.workspace_id,new.normalized_content);END;
  DROP TRIGGER IF EXISTS memories_validate_insert;DROP TRIGGER IF EXISTS memories_validate_update;
  CREATE TRIGGER memories_validate_insert BEFORE INSERT ON memories BEGIN SELECT RAISE(ABORT,'invalid memory status') WHERE NEW.status NOT IN('ACTIVE','SUPERSEDED','ARCHIVED','CANDIDATE');SELECT RAISE(ABORT,'invalid sensitivity') WHERE NEW.sensitivity NOT IN('public','personal','private','secret','ephemeral');SELECT RAISE(ABORT,'invalid scope') WHERE NEW.scope NOT IN('global','workspace','conversation');SELECT RAISE(ABORT,'invalid score') WHERE NEW.importance<0 OR NEW.importance>1 OR NEW.confidence<0 OR NEW.confidence>1;SELECT RAISE(ABORT,'invalid conversation scope_key') WHERE NEW.scope='conversation' AND(NEW.scope_key IS NULL OR trim(NEW.scope_key)='');SELECT RAISE(ABORT,'invalid interval') WHERE NEW.valid_until IS NOT NULL AND NEW.valid_from IS NOT NULL AND NEW.valid_until<NEW.valid_from;SELECT RAISE(ABORT,'negative access_count') WHERE NEW.access_count<0;END;
  CREATE TRIGGER memories_validate_update BEFORE UPDATE ON memories BEGIN SELECT RAISE(ABORT,'invalid memory status') WHERE NEW.status NOT IN('ACTIVE','SUPERSEDED','ARCHIVED','CANDIDATE');SELECT RAISE(ABORT,'invalid sensitivity') WHERE NEW.sensitivity NOT IN('public','personal','private','secret','ephemeral');SELECT RAISE(ABORT,'invalid scope') WHERE NEW.scope NOT IN('global','workspace','conversation');SELECT RAISE(ABORT,'invalid score') WHERE NEW.importance<0 OR NEW.importance>1 OR NEW.confidence<0 OR NEW.confidence>1;SELECT RAISE(ABORT,'invalid conversation scope_key') WHERE NEW.scope='conversation' AND(NEW.scope_key IS NULL OR trim(NEW.scope_key)='');SELECT RAISE(ABORT,'invalid interval') WHERE NEW.valid_until IS NOT NULL AND NEW.valid_from IS NOT NULL AND NEW.valid_until<NEW.valid_from;SELECT RAISE(ABORT,'negative access_count') WHERE NEW.access_count<0;END;
@@ -1191,6 +1278,117 @@ fn migrate(conn: &mut Connection) -> std::result::Result<(), rusqlite::Error> {
     }
     if current < 8 {
         tx.execute_batch("CREATE TABLE IF NOT EXISTS request_receipts(request_id TEXT PRIMARY KEY,digest TEXT NOT NULL,response TEXT,created_at INTEGER NOT NULL);CREATE INDEX IF NOT EXISTS idx_request_receipts_age ON request_receipts(created_at);")?;
+    }
+    if current < 9 {
+        if !table_has_column(&tx, "memories", "gist")? {
+            tx.execute(
+                "ALTER TABLE memories ADD COLUMN gist TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+        if !table_has_column(&tx, "memories", "tokens_est")? {
+            tx.execute(
+                "ALTER TABLE memories ADD COLUMN tokens_est INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS baseline_revisions(namespace TEXT NOT NULL,workspace_id TEXT NOT NULL,scope_key TEXT NOT NULL DEFAULT '',revision INTEGER NOT NULL DEFAULT 1,updated_at INTEGER NOT NULL,PRIMARY KEY(namespace,workspace_id,scope_key));
+             CREATE INDEX IF NOT EXISTS idx_recall_traces_age ON recall_traces(created_at);
+             CREATE INDEX IF NOT EXISTS idx_memory_receipts_age ON memory_consumption_receipts(consumed_at);
+             DROP INDEX IF EXISTS idx_memories_active_identity;"
+        )?;
+        let rows = {
+            let mut stmt = tx.prepare("SELECT id,content FROM memories")?;
+            stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        for (id, content) in rows {
+            let normalized = normalize(&content);
+            let content_hash = hash_normalized(&normalized);
+            let gist = gist_for_content(&content, 180);
+            let tokens = i64::try_from(estimate_tokens(&content)).unwrap_or(i64::MAX);
+            tx.execute(
+                "UPDATE memories SET normalized_content=?1,content_hash=?2,gist=?3,tokens_est=?4 WHERE id=?5",
+                params![normalized,content_hash,gist,tokens,id],
+            )?;
+        }
+        tx.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS v9_duplicate_map(loser TEXT PRIMARY KEY,keeper TEXT NOT NULL,max_rank INTEGER NOT NULL);
+             DELETE FROM v9_duplicate_map;
+             INSERT INTO v9_duplicate_map(loser,keeper,max_rank)
+             WITH ranked AS (
+               SELECT id,
+                      FIRST_VALUE(id) OVER (
+                        PARTITION BY namespace,workspace_id,scope,COALESCE(scope_key,''),kind,content_hash
+                        ORDER BY pinned DESC,importance DESC,updated_at DESC,id ASC
+                      ) AS keeper,
+                      MAX(CASE sensitivity WHEN 'public' THEN 0 WHEN 'personal' THEN 1 WHEN 'private' THEN 2 WHEN 'secret' THEN 3 ELSE 4 END)
+                        OVER (PARTITION BY namespace,workspace_id,scope,COALESCE(scope_key,''),kind,content_hash) AS max_rank,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY namespace,workspace_id,scope,COALESCE(scope_key,''),kind,content_hash
+                        ORDER BY pinned DESC,importance DESC,updated_at DESC,id ASC
+                      ) AS rn
+               FROM memories WHERE status='ACTIVE'
+             )
+             SELECT id,keeper,max_rank FROM ranked WHERE rn>1;
+             UPDATE memories SET sensitivity=CASE
+               (SELECT MAX(max_rank) FROM v9_duplicate_map d WHERE d.keeper=memories.id)
+               WHEN 0 THEN 'public' WHEN 1 THEN 'personal' WHEN 2 THEN 'private' WHEN 3 THEN 'secret' ELSE 'ephemeral' END
+             WHERE id IN (SELECT DISTINCT keeper FROM v9_duplicate_map);
+             UPDATE memories SET status='SUPERSEDED',
+                 supersedes_id=(SELECT keeper FROM v9_duplicate_map d WHERE d.loser=memories.id),
+                 valid_until=CASE WHEN valid_until IS NULL OR valid_until>unixepoch() THEN unixepoch() ELSE valid_until END
+             WHERE id IN (SELECT loser FROM v9_duplicate_map);
+             DROP TABLE v9_duplicate_map;
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_active_identity ON memories(namespace,workspace_id,scope,COALESCE(scope_key,''),kind,content_hash) WHERE status='ACTIVE';
+             DROP TRIGGER IF EXISTS memories_fts_insert;
+             DROP TRIGGER IF EXISTS memories_fts_delete;
+             DROP TRIGGER IF EXISTS memories_fts_update;
+             DROP TABLE IF EXISTS memories_fts;
+             CREATE VIRTUAL TABLE memories_fts USING fts5(id UNINDEXED,namespace UNINDEXED,workspace_id UNINDEXED,normalized_content,tokenize='unicode61 remove_diacritics 2');
+             INSERT INTO memories_fts(rowid,id,namespace,workspace_id,normalized_content)
+               SELECT rowid,id,namespace,workspace_id,normalized_content FROM memories;
+             CREATE TRIGGER memories_fts_insert AFTER INSERT ON memories BEGIN
+               INSERT INTO memories_fts(rowid,id,namespace,workspace_id,normalized_content)
+               VALUES(new.rowid,new.id,new.namespace,new.workspace_id,new.normalized_content);
+             END;
+             CREATE TRIGGER memories_fts_delete AFTER DELETE ON memories BEGIN
+               DELETE FROM memories_fts WHERE rowid=old.rowid;
+             END;
+             CREATE TRIGGER memories_fts_update AFTER UPDATE OF normalized_content ON memories BEGIN
+               DELETE FROM memories_fts WHERE rowid=old.rowid;
+               INSERT INTO memories_fts(rowid,id,namespace,workspace_id,normalized_content)
+               VALUES(new.rowid,new.id,new.namespace,new.workspace_id,new.normalized_content);
+             END;
+             INSERT INTO baseline_revisions(namespace,workspace_id,scope_key,revision,updated_at)
+               SELECT namespace,workspace_id,COALESCE(scope_key,''),1,unixepoch() FROM memories
+               GROUP BY namespace,workspace_id,COALESCE(scope_key,'')
+             ON CONFLICT(namespace,workspace_id,scope_key) DO NOTHING;
+             DROP TRIGGER IF EXISTS baseline_revision_insert;
+             DROP TRIGGER IF EXISTS baseline_revision_update;
+             DROP TRIGGER IF EXISTS baseline_revision_delete;
+             CREATE TRIGGER baseline_revision_insert AFTER INSERT ON memories BEGIN
+               INSERT INTO baseline_revisions(namespace,workspace_id,scope_key,revision,updated_at)
+               VALUES(new.namespace,new.workspace_id,COALESCE(new.scope_key,''),1,unixepoch())
+               ON CONFLICT(namespace,workspace_id,scope_key) DO UPDATE SET revision=revision+1,updated_at=unixepoch();
+             END;
+             CREATE TRIGGER baseline_revision_update AFTER UPDATE OF namespace,workspace_id,kind,content,normalized_content,status,sensitivity,scope,scope_key,importance,confidence,updated_at,valid_from,valid_until,supersedes_id,content_hash,pinned,metadata_json,gist,tokens_est ON memories BEGIN
+               INSERT INTO baseline_revisions(namespace,workspace_id,scope_key,revision,updated_at)
+               VALUES(old.namespace,old.workspace_id,COALESCE(old.scope_key,''),1,unixepoch())
+               ON CONFLICT(namespace,workspace_id,scope_key) DO UPDATE SET revision=revision+1,updated_at=unixepoch();
+               INSERT INTO baseline_revisions(namespace,workspace_id,scope_key,revision,updated_at)
+               VALUES(new.namespace,new.workspace_id,COALESCE(new.scope_key,''),1,unixepoch())
+               ON CONFLICT(namespace,workspace_id,scope_key) DO UPDATE SET revision=revision+1,updated_at=unixepoch();
+             END;
+             CREATE TRIGGER baseline_revision_delete AFTER DELETE ON memories BEGIN
+               INSERT INTO baseline_revisions(namespace,workspace_id,scope_key,revision,updated_at)
+               VALUES(old.namespace,old.workspace_id,COALESCE(old.scope_key,''),1,unixepoch())
+               ON CONFLICT(namespace,workspace_id,scope_key) DO UPDATE SET revision=revision+1,updated_at=unixepoch();
+             END;"
+        )?;
     }
     if current < STORE_SCHEMA_VERSION {
         tx.execute("UPDATE schema_info SET version=?1", [STORE_SCHEMA_VERSION])?;

@@ -15,6 +15,21 @@ K.I.T.T. Memory is the shared persistent memory data plane used across the ecosy
 
 ---
 
+## Memory 0.9.0 — deterministic low-latency retrieval
+
+Memory 0.9.0 optimizes the read plane without changing protocol wire version 1 or weakening scope/privacy guarantees. Search is now side-effect free: merely ranking or presenting a candidate no longer increments access telemetry. Explicit hydration and positive consumption evidence remain the reinforcement points.
+
+The SQLite schema advances to v9 with precomputed compact gists/token estimates, a normalized-content-only FTS5 index, reader connection reuse, bounded recall-trace buffering and periodic cleanup/optimization. Candidate fallback is bounded and relevance-gated instead of injecting high-salience rows into every query.
+
+Baselines are deterministic with respect to stored semantic state and expose optional `baseline_revision` + `etag`. `memory.baseline.request` accepts `if_none_match`; an unchanged baseline returns `not_modified=true` without retransmitting entries. Access-only telemetry does not advance the revision.
+
+Progressive retrieval keeps the existing v1 response fields for compatibility and adds optional request controls:
+- `include_provenance` to avoid provenance hydration when it is not needed;
+- `exclude_ids` on search for session-level duplicate suppression;
+- `include_context_hints` to opt into `context_hints` / `common` navigation metadata without changing the default v1 response shape.
+
+The daemon now uses a fixed worker pool, bounded connection queue, keep-alive request loops and constant-time token comparison. Recall traces are buffered off the search hot path and flushed in short batches.
+
 ## Memory 0.7.0 — progressive retrieval with memory-owned budgets
 
 Memory 0.7.0 makes progressive retrieval the normal Agent-facing path. `memory.search` returns ranked snippets and provenance under a caller-provided token budget, `memory.get` hydrates only explicitly selected IDs under a second budget, and `memory.timeline` exposes bounded temporal/source-scoped history. The daemon remains responsible for enforcing scope, sensitivity and token pressure; consumers no longer depend on a fixed `limit=8` as the primary context-size control.
@@ -42,11 +57,11 @@ Background extraction/consolidation work can be represented by durable `MemoryJo
 ## What’s included
 
 - Pure Rust memory-domain core.
-- SQLite WAL storage adapter with busy-timeout and write coordination.
+- SQLite WAL storage adapter with busy-timeout, bounded writer coordination and a reusable reader pool.
 - Exact-content SHA-256 deduplication plus conservative near-duplicate review candidates.
-- SQLite FTS5 candidate retrieval with retention-aware ranking.
+- Normalized-content FTS5 candidate retrieval with bounded lexical fallback and retention-aware ranking.
 - Optional semantic reranking through a product-neutral `SemanticReranker` port; lexical/local behavior remains the fallback.
-- Deterministic, token-bounded memory baselines with explicit budget pressure and dropped-entry counts.
+- Deterministic, token-bounded memory baselines with revision/ETag reuse, explicit budget pressure and dropped-entry counts.
 - Shared correction ledger for learning from prior mistakes.
 - Shared concepts and weighted typed knowledge links without coupling the memory crate to Agent session semantics.
 - Temporal memory validity with `valid_from` / `valid_until`, point-in-time recall and validity-closing supersession.
@@ -173,7 +188,9 @@ The engine is optimized for a local, persistent workload rather than an external
 - Concept search can expand through a bounded, cycle-safe knowledge neighborhood after FTS seed selection.
 - Optional semantic scoring reranks only the bounded candidate set; it is not a storage dependency.
 - Baseline generation is deterministic and token-bounded, which helps stable prompt prefixes and exposes memory pressure instead of silently hiding it.
-- Access-only updates do not rebuild FTS rows; graph expansion batches each frontier instead of opening per-node connections. Expired rows can be pruned.
+- Search presentation is read-only; access telemetry is reinforced only by explicit hydration/reference/action evidence and does not invalidate baseline revisions.
+- Access-only updates do not rebuild FTS rows; graph expansion batches each frontier instead of opening per-node connections.
+- Recall traces are buffered off the search hot path, while periodic maintenance prunes bounded observability/job history and runs SQLite optimization/checkpoint work.
 
 This keeps memory useful to the Agent without making memory retrieval itself a network dependency.
 
@@ -195,7 +212,10 @@ The consuming component is still responsible for applying its own egress and aut
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all
+cargo run --release -p kitt-memory-sqlite --example retrieval_benchmark -- 2000 250
 ```
+
+The benchmark prints JSON with seed time and mean/p50/p95/p99 retrieval latency. It is intentionally dependency-free so benchmark tooling does not enter the runtime lock graph.
 
 ---
 

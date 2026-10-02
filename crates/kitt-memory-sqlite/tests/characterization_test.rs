@@ -135,7 +135,7 @@ fn test_pinned_ordering_and_decision_priority() {
 }
 
 #[test]
-fn test_access_count_and_timestamp_touch() {
+fn test_search_does_not_touch_but_explicit_hydration_does() {
     let db = temp_db_path("touch");
     let store = SqliteMemoryStore::open(&db).unwrap();
 
@@ -158,37 +158,23 @@ fn test_access_count_and_timestamp_touch() {
     assert_eq!(mem.access_count, 0);
     assert_eq!(mem.last_accessed_at, None);
 
-    // Recall once
-    let recalled = store
-        .recall(&RecallQuery {
-            namespace: "agent-cli".into(),
-            workspace_id: "ws-1".into(),
-            scope_key: None,
-            text: "Rust version".into(),
-            limit: 5,
-            as_of: None,
-            allow_private: true,
-            allow_secret: true,
-        })
-        .unwrap();
-    assert_eq!(recalled.len(), 1);
+    let query = RecallQuery {
+        namespace: "agent-cli".into(),
+        workspace_id: "ws-1".into(),
+        scope_key: None,
+        text: "Rust version".into(),
+        limit: 5,
+        as_of: None,
+        allow_private: true,
+        allow_secret: true,
+    };
+    assert_eq!(store.recall(&query).unwrap()[0].access_count, 0);
+    assert_eq!(store.recall(&query).unwrap()[0].access_count, 0);
 
-    // Recall second time - access count in database should have incremented
-    let recalled2 = store
-        .recall(&RecallQuery {
-            namespace: "agent-cli".into(),
-            workspace_id: "ws-1".into(),
-            scope_key: None,
-            text: "Rust version".into(),
-            limit: 5,
-            as_of: None,
-            allow_private: true,
-            allow_secret: true,
-        })
-        .unwrap();
-    assert_eq!(recalled2.len(), 1);
-    assert_eq!(recalled2[0].access_count, 1);
-    assert!(recalled2[0].last_accessed_at.is_some());
+    store.touch_records(std::slice::from_ref(&mem.id)).unwrap();
+    let hydrated = store.recall(&query).unwrap();
+    assert_eq!(hydrated[0].access_count, 1);
+    assert!(hydrated[0].last_accessed_at.is_some());
 
     let _ = std::fs::remove_file(&db);
 }
@@ -688,5 +674,160 @@ fn progressive_hydration_and_timeline_preserve_scope_and_provenance() {
         Some("kitt://repo/docs/architecture")
     );
 
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn migration_v8_to_v9_rehashes_without_data_loss_or_sensitivity_downgrade() {
+    use rusqlite::Connection;
+
+    let db = temp_db_path("migration-v9");
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_info(version INTEGER NOT NULL);
+             INSERT INTO schema_info(version) VALUES(8);
+             CREATE TABLE memories(
+               id TEXT PRIMARY KEY,namespace TEXT NOT NULL,workspace_id TEXT NOT NULL,
+               kind TEXT NOT NULL,content TEXT NOT NULL,normalized_content TEXT NOT NULL,
+               status TEXT NOT NULL,sensitivity TEXT NOT NULL,scope TEXT NOT NULL,scope_key TEXT,
+               importance REAL NOT NULL,confidence REAL NOT NULL,created_at INTEGER NOT NULL,
+               updated_at INTEGER NOT NULL,last_accessed_at INTEGER,access_count INTEGER NOT NULL DEFAULT 0,
+               valid_from INTEGER,valid_until INTEGER,supersedes_id TEXT,content_hash TEXT NOT NULL,
+               pinned INTEGER NOT NULL DEFAULT 0,metadata_json TEXT NOT NULL DEFAULT '{}'
+             );
+             INSERT INTO memories VALUES(
+               'a','agent-cli','ws','PROJECT_RULE','Ação padrão','ação padrão','ACTIVE','public',
+               'workspace',NULL,0.8,1.0,1,1,NULL,0,1,NULL,NULL,'old-a',0,'{}'
+             );
+             INSERT INTO memories VALUES(
+               'b','agent-cli','ws','PROJECT_RULE','acao padrao','acao padrao','ACTIVE','secret',
+               'workspace',NULL,0.9,1.0,2,2,NULL,0,2,NULL,NULL,'old-b',1,'{}'
+             );",
+        )
+        .unwrap();
+    }
+
+    let store = SqliteMemoryStore::open(&db).unwrap();
+    let rows = store
+        .recall(&RecallQuery {
+            namespace: "agent-cli".into(),
+            workspace_id: "ws".into(),
+            scope_key: None,
+            text: "acao padrao".into(),
+            limit: 10,
+            as_of: None,
+            allow_private: true,
+            allow_secret: true,
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].sensitivity, Sensitivity::Secret);
+    assert_eq!(rows[0].normalized_content, "acao padrao");
+    assert!(!rows[0].gist.is_empty());
+    assert!(rows[0].tokens_est > 0);
+
+    let conn = Connection::open(&db).unwrap();
+    let version: i64 = conn
+        .query_row("SELECT version FROM schema_info LIMIT 1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let total: i64 = conn
+        .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
+        .unwrap();
+    let superseded: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE status='SUPERSEDED'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, 9);
+    assert_eq!(total, 2);
+    assert_eq!(superseded, 1);
+
+    drop(conn);
+    drop(store);
+
+    let reopened = SqliteMemoryStore::open(&db).unwrap();
+    let inserted = reopened
+        .remember(NewMemory {
+            namespace: "agent-cli".into(),
+            workspace_id: "ws".into(),
+            kind: MemoryKind::TechnicalFact,
+            content: "Restart-safe FTS trigger".into(),
+            sensitivity: Sensitivity::Private,
+            scope: MemoryScope::Workspace,
+            scope_key: None,
+            importance: 0.7,
+            confidence: 1.0,
+            pinned: false,
+            ttl_seconds: None,
+            metadata_json: "{}".into(),
+        })
+        .unwrap();
+    let recalled = reopened
+        .recall(&RecallQuery {
+            namespace: "agent-cli".into(),
+            workspace_id: "ws".into(),
+            scope_key: None,
+            text: "restart safe trigger".into(),
+            limit: 5,
+            as_of: None,
+            allow_private: true,
+            allow_secret: false,
+        })
+        .unwrap();
+    assert!(recalled.iter().any(|record| record.id == inserted.id));
+
+    drop(reopened);
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn baseline_revision_ignores_access_telemetry_but_tracks_semantic_changes() {
+    let db = temp_db_path("baseline-revision");
+    let store = SqliteMemoryStore::open(&db).unwrap();
+    let record = store
+        .remember(NewMemory {
+            namespace: "agent-cli".into(),
+            workspace_id: "ws".into(),
+            kind: MemoryKind::ProjectRule,
+            content: "Run validation before release".into(),
+            sensitivity: Sensitivity::Private,
+            scope: MemoryScope::Workspace,
+            scope_key: None,
+            importance: 0.9,
+            confidence: 1.0,
+            pinned: true,
+            ttl_seconds: None,
+            metadata_json: "{}".into(),
+        })
+        .unwrap();
+    let query = BaselineQuery {
+        namespace: "agent-cli".into(),
+        workspace_id: "ws".into(),
+        scope_key: None,
+        max_tokens: 256,
+        as_of: None,
+        allow_private: true,
+        allow_secret: false,
+    };
+
+    let first = store.baseline(&query).unwrap();
+    store
+        .touch_records(std::slice::from_ref(&record.id))
+        .unwrap();
+    let second = store.baseline(&query).unwrap();
+    assert_eq!(first.baseline_revision, second.baseline_revision);
+    assert_eq!(first.etag, second.etag);
+
+    store.set_pinned(&record.id, false).unwrap();
+    let third = store.baseline(&query).unwrap();
+    assert!(third.baseline_revision > second.baseline_revision);
+    assert_ne!(third.etag, second.etag);
+
+    drop(store);
     let _ = std::fs::remove_file(&db);
 }
