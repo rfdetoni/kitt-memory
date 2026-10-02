@@ -241,7 +241,7 @@ impl SqliteMemoryStore {
             Vec::new()
         } else {
             self.with_conn(|conn| {
-                let sql = format!("SELECT {MEMORY_COLUMNS},bm25(memories_fts,0.0,0.0,0.0,1.0) FROM memories_fts JOIN memories m ON m.rowid=memories_fts.rowid WHERE memories_fts MATCH ?1 AND m.namespace=?2 AND (m.scope='global' OR (m.workspace_id=?3 AND m.scope='workspace') OR (m.workspace_id=?3 AND m.scope='conversation' AND m.scope_key=?4)) AND m.status='ACTIVE' AND (m.valid_from IS NULL OR m.valid_from<=?5) AND (m.valid_until IS NULL OR m.valid_until>?5) AND m.sensitivity<>'ephemeral' AND (m.sensitivity<>'private' OR ?6=1) AND (m.sensitivity<>'secret' OR ?7=1) ORDER BY bm25(memories_fts,0.0,0.0,0.0,1.0) ASC LIMIT ?8");
+                let sql = format!("SELECT {MEMORY_COLUMNS},bm25(memories_fts,0.0,0.0,1.0) FROM memories_fts JOIN memories m ON m.rowid=memories_fts.rowid WHERE memories_fts MATCH ?1 AND m.namespace=?2 AND (m.scope='global' OR (m.workspace_id=?3 AND m.scope='workspace') OR (m.workspace_id=?3 AND m.scope='conversation' AND m.scope_key=?4)) AND m.status='ACTIVE' AND (m.valid_from IS NULL OR m.valid_from<=?5) AND (m.valid_until IS NULL OR m.valid_until>?5) AND m.sensitivity<>'ephemeral' AND (m.sensitivity<>'private' OR ?6=1) AND (m.sensitivity<>'secret' OR ?7=1) ORDER BY bm25(memories_fts,0.0,0.0,1.0) ASC LIMIT ?8");
                 let mut stmt=conn.prepare(&sql)?;
                 stmt.query_map(params![fts,query.namespace,query.workspace_id,scope_key,at,query.allow_private as i64,query.allow_secret as i64,cap as i64],|row| Ok((map_memory_row(row)?,row.get::<_,f64>(24)? as f32)))?.collect::<std::result::Result<Vec<_>,_>>()
             })?
@@ -312,8 +312,16 @@ impl SqliteMemoryStore {
             .iter()
             .map(|m| m.id.as_str())
             .collect::<HashSet<_>>();
+        let mut lexical_confidence = candidates
+            .iter()
+            .take(8)
+            .map(|(memory, _)| lexical_similarity_with_terms(&terms, memory))
+            .collect::<Vec<_>>();
+        lexical_confidence.sort_by(|left, right| right.total_cmp(left));
+        let first_lexical = lexical_confidence.first().copied().unwrap_or(0.0);
+        let second_lexical = lexical_confidence.get(1).copied().unwrap_or(0.0);
         let lexical_margin_high =
-            candidates.len() > 1 && (candidates[1].1.abs() - candidates[0].1.abs()).abs() >= 1.5;
+            first_lexical >= 0.45 && first_lexical - second_lexical >= 0.20;
         let semantic_scores = if lexical_margin_high {
             HashMap::new()
         } else {
@@ -335,7 +343,8 @@ impl SqliteMemoryStore {
                 let fts_score = if bm25 == 0.0 {
                     0.0
                 } else {
-                    1.0 / (1.0 + bm25.abs())
+                    let relevance = (-bm25).max(0.0);
+                    relevance / (1.0 + relevance)
                 };
                 let retained = kitt_memory_core::retention_score(&memory, now).min(1.25);
                 let rr = 60.0 / (61.0 + index as f32);
@@ -1368,7 +1377,7 @@ fn migrate(conn: &mut Connection) -> std::result::Result<(), rusqlite::Error> {
                VALUES(new.namespace,new.workspace_id,COALESCE(new.scope_key,''),1,unixepoch())
                ON CONFLICT(namespace,workspace_id,scope_key) DO UPDATE SET revision=revision+1,updated_at=unixepoch();
              END;
-             CREATE TRIGGER baseline_revision_update AFTER UPDATE ON memories BEGIN
+             CREATE TRIGGER baseline_revision_update AFTER UPDATE OF namespace,workspace_id,kind,content,normalized_content,status,sensitivity,scope,scope_key,importance,confidence,updated_at,valid_from,valid_until,supersedes_id,content_hash,pinned,metadata_json,gist,tokens_est ON memories BEGIN
                INSERT INTO baseline_revisions(namespace,workspace_id,scope_key,revision,updated_at)
                VALUES(old.namespace,old.workspace_id,COALESCE(old.scope_key,''),1,unixepoch())
                ON CONFLICT(namespace,workspace_id,scope_key) DO UPDATE SET revision=revision+1,updated_at=unixepoch();
