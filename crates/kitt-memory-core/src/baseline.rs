@@ -157,7 +157,9 @@ pub fn build_memory_baseline(
             continue;
         }
         used_tokens = used_tokens.saturating_add(cost_tokens);
-        used_chars = used_chars.saturating_add(content.chars().count()).saturating_add(label.len());
+        used_chars = used_chars
+            .saturating_add(content.chars().count())
+            .saturating_add(label.len());
         entries.push(BaselineEntry {
             memory_id: memory.id,
             section: label.into(),
@@ -271,8 +273,16 @@ mod tests {
         b.last_accessed_at = Some(10_000_000);
         let second = build_memory_baseline(vec![a, b], &query);
         assert_eq!(
-            first.entries.iter().map(|entry| &entry.memory_id).collect::<Vec<_>>(),
-            second.entries.iter().map(|entry| &entry.memory_id).collect::<Vec<_>>()
+            first
+                .entries
+                .iter()
+                .map(|entry| &entry.memory_id)
+                .collect::<Vec<_>>(),
+            second
+                .entries
+                .iter()
+                .map(|entry| &entry.memory_id)
+                .collect::<Vec<_>>()
         );
     }
 }
