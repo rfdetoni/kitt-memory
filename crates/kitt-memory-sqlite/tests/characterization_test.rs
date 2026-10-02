@@ -135,7 +135,7 @@ fn test_pinned_ordering_and_decision_priority() {
 }
 
 #[test]
-fn test_access_count_and_timestamp_touch() {
+fn test_search_does_not_touch_but_explicit_hydration_does() {
     let db = temp_db_path("touch");
     let store = SqliteMemoryStore::open(&db).unwrap();
 
@@ -158,37 +158,23 @@ fn test_access_count_and_timestamp_touch() {
     assert_eq!(mem.access_count, 0);
     assert_eq!(mem.last_accessed_at, None);
 
-    // Recall once
-    let recalled = store
-        .recall(&RecallQuery {
-            namespace: "agent-cli".into(),
-            workspace_id: "ws-1".into(),
-            scope_key: None,
-            text: "Rust version".into(),
-            limit: 5,
-            as_of: None,
-            allow_private: true,
-            allow_secret: true,
-        })
-        .unwrap();
-    assert_eq!(recalled.len(), 1);
+    let query = RecallQuery {
+        namespace: "agent-cli".into(),
+        workspace_id: "ws-1".into(),
+        scope_key: None,
+        text: "Rust version".into(),
+        limit: 5,
+        as_of: None,
+        allow_private: true,
+        allow_secret: true,
+    };
+    assert_eq!(store.recall(&query).unwrap()[0].access_count, 0);
+    assert_eq!(store.recall(&query).unwrap()[0].access_count, 0);
 
-    // Recall second time - access count in database should have incremented
-    let recalled2 = store
-        .recall(&RecallQuery {
-            namespace: "agent-cli".into(),
-            workspace_id: "ws-1".into(),
-            scope_key: None,
-            text: "Rust version".into(),
-            limit: 5,
-            as_of: None,
-            allow_private: true,
-            allow_secret: true,
-        })
-        .unwrap();
-    assert_eq!(recalled2.len(), 1);
-    assert_eq!(recalled2[0].access_count, 1);
-    assert!(recalled2[0].last_accessed_at.is_some());
+    store.touch_records(std::slice::from_ref(&mem.id)).unwrap();
+    let hydrated = store.recall(&query).unwrap();
+    assert_eq!(hydrated[0].access_count, 1);
+    assert!(hydrated[0].last_accessed_at.is_some());
 
     let _ = std::fs::remove_file(&db);
 }
