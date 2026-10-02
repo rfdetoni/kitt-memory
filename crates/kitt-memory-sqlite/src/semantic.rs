@@ -107,6 +107,55 @@ impl SqliteMemoryStore {
             .collect())
     }
 
+    /// Fetch provenance for a bounded set of memories in one query.
+    pub fn sources_for_memories(
+        &self,
+        memory_ids: &[String],
+    ) -> Result<HashMap<String, Vec<MemorySource>>> {
+        if memory_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let bounded = memory_ids.iter().take(128).cloned().collect::<Vec<_>>();
+        let placeholders = (0..bounded.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT id,memory_id,source_kind,source_id,source_uri,source_digest,relationship,source_revision,observed_at,valid_from,valid_until
+             FROM memory_sources WHERE memory_id IN ({placeholders})
+             ORDER BY memory_id ASC,observed_at DESC,id ASC"
+        );
+        let rows = self.with_conn(|conn| {
+            let mut stmt = conn.prepare_cached(&sql)?;
+            stmt.query_map(
+                rusqlite::params_from_iter(
+                    bounded.iter().cloned().map(rusqlite::types::Value::from),
+                ),
+                |row| {
+                    Ok(MemorySource {
+                        id: row.get(0)?,
+                        memory_id: row.get(1)?,
+                        source_kind: row.get(2)?,
+                        source_id: row.get(3)?,
+                        source_uri: row.get(4)?,
+                        source_digest: row.get(5)?,
+                        relationship: row.get(6)?,
+                        source_revision: row.get(7)?,
+                        observed_at: row.get(8)?,
+                        valid_from: row.get(9)?,
+                        valid_until: row.get(10)?,
+                    })
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()
+        })?;
+        let mut grouped = HashMap::<String, Vec<MemorySource>>::new();
+        for source in rows {
+            let bucket = grouped.entry(source.memory_id.clone()).or_default();
+            if bucket.len() < 8 {
+                bucket.push(source);
+            }
+        }
+        Ok(grouped)
+    }
+
     /// Return memories in temporal order, optionally narrowed to one provenance source.
     pub fn timeline_memories(&self, query: &TimelineMemoryQuery<'_>) -> Result<Vec<MemoryRecord>> {
         if query.limit == 0 {
