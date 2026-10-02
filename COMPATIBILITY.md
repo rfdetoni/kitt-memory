@@ -34,6 +34,6 @@ This is a duplicate-dispatch barrier, not a claim of exactly-once transactions.
 
 SQLite schema 9 is forward-only; stop an older daemon before upgrading. The migration is transactional, recomputes normalized content/hashes/gists/token estimates and resolves any newly colliding active identities without deleting historical rows. Duplicate resolution preserves the most restrictive sensitivity.
 
-Protocol wire version remains 1. Existing `memory.search`, `memory.timeline` and `memory.get` response fields remain present. New fields and controls are additive: `include_provenance`, `exclude_ids`, `context_hints`, `common`, `memory.baseline.request`, `baseline_revision` and `etag`.
+Protocol wire version remains 1. Existing `memory.search`, `memory.timeline` and `memory.get` response fields remain present. New fields and controls are additive: `include_provenance`, `exclude_ids`, `include_context_hints`, `context_hints`, `common`, `memory.baseline.request`, `baseline_revision` and `etag`. Context hints/common are emitted only when explicitly requested, so legacy strict response decoders keep the original v1 shape.
 
 Search and ordinary recall do not mutate access telemetry. Explicit hydration and receipts marked referenced/used-for-action are the reinforcement points. Baseline revisions intentionally ignore access-only updates.
