@@ -426,22 +426,28 @@ fn progressive_search(store: &SqliteMemoryStore, payload: &Value) -> Result<Valu
     let candidates = records.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
     let provenance = provenance_for_many(store, &candidates, include_provenance)?;
 
-    let common_scope = include_context_hints.then(|| {
-        records.first().and_then(|first| {
-            records
-                .iter()
-                .all(|record| record.scope == first.scope && record.scope_key == first.scope_key)
-                .then(|| (first.scope.as_db().to_string(), first.scope_key.clone()))
+    let common_scope = include_context_hints
+        .then(|| {
+            records.first().and_then(|first| {
+                records
+                    .iter()
+                    .all(|record| {
+                        record.scope == first.scope && record.scope_key == first.scope_key
+                    })
+                    .then(|| (first.scope.as_db().to_string(), first.scope_key.clone()))
+            })
         })
-    }).flatten();
-    let common_sensitivity = include_context_hints.then(|| {
-        records.first().and_then(|first| {
-            records
-                .iter()
-                .all(|record| record.sensitivity == first.sensitivity)
-                .then(|| first.sensitivity.as_db().to_string())
+        .flatten();
+    let common_sensitivity = include_context_hints
+        .then(|| {
+            records.first().and_then(|first| {
+                records
+                    .iter()
+                    .all(|record| record.sensitivity == first.sensitivity)
+                    .then(|| first.sensitivity.as_db().to_string())
+            })
         })
-    }).flatten();
+        .flatten();
 
     let mut consumed = 0_u64;
     let mut hits = Vec::new();
