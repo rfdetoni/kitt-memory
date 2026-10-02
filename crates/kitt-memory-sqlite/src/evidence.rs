@@ -33,6 +33,15 @@ impl SqliteMemoryStore {
             ],
         )
         .map_err(storage)?;
+        if receipt.referenced || receipt.used_for_action {
+            conn.execute(
+                "UPDATE memories
+                 SET last_accessed_at=?1,access_count=access_count+1
+                 WHERE id=?2",
+                params![receipt.consumed_at.max(now_epoch()), receipt.memory_id],
+            )
+            .map_err(storage)?;
+        }
         Ok(())
     }
 
