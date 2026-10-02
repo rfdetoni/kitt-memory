@@ -410,10 +410,24 @@ impl EgressPolicy {
     }
 }
 
+fn fold_latin_diacritic(ch: char) -> char {
+    match ch {
+        'á' | 'à' | 'â' | 'ã' | 'ä' | 'å' => 'a',
+        'é' | 'è' | 'ê' | 'ë' => 'e',
+        'í' | 'ì' | 'î' | 'ï' => 'i',
+        'ó' | 'ò' | 'ô' | 'õ' | 'ö' => 'o',
+        'ú' | 'ù' | 'û' | 'ü' => 'u',
+        'ç' => 'c',
+        'ñ' => 'n',
+        'ý' | 'ÿ' => 'y',
+        other => other,
+    }
+}
+
 pub fn normalize(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let mut separator = false;
-    for ch in value.chars().flat_map(char::to_lowercase) {
+    for ch in value.chars().flat_map(char::to_lowercase).map(fold_latin_diacritic) {
         if ch.is_alphanumeric() || ch == '_' || ch == '-' {
             out.push(ch);
             separator = false;
@@ -423,6 +437,35 @@ pub fn normalize(value: &str) -> String {
         }
     }
     out.trim().to_string()
+}
+
+/// Stable, allocation-free token estimate used by every budgeted memory surface.
+///
+/// The estimator intentionally errs slightly high for non-ASCII text and code-like
+/// punctuation so budgets remain conservative without binding the memory daemon to a
+/// specific model tokenizer.
+pub fn estimate_tokens(value: &str) -> usize {
+    if value.is_empty() {
+        return 0;
+    }
+    let mut ascii = 0usize;
+    let mut non_ascii = 0usize;
+    let mut punctuation = 0usize;
+    for ch in value.chars() {
+        if ch.is_ascii() {
+            ascii = ascii.saturating_add(1);
+            if ch.is_ascii_punctuation() {
+                punctuation = punctuation.saturating_add(1);
+            }
+        } else {
+            non_ascii = non_ascii.saturating_add(1);
+        }
+    }
+    ascii
+        .saturating_add(3)
+        .div_ceil(4)
+        .saturating_add(non_ascii.saturating_mul(2))
+        .saturating_add(punctuation.div_ceil(12))
 }
 
 fn validate_identity(namespace: &str, workspace_id: &str) -> Result<()> {
@@ -488,6 +531,13 @@ mod tests {
     #[test]
     fn normalization_is_stable() {
         assert_eq!("hello world", normalize("  Hello   WORLD "));
+        assert_eq!("acao configuracao", normalize("Ação configuração"));
+    }
+
+    #[test]
+    fn token_estimate_is_stable_and_unicode_aware() {
+        assert_eq!(1, estimate_tokens("abc"));
+        assert!(estimate_tokens("ação") >= estimate_tokens("acao"));
     }
 
     #[test]
