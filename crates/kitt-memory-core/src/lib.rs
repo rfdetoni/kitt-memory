@@ -20,7 +20,8 @@ pub use knowledge::{
 };
 pub use ranking::{
     MergeAssessment, MergeCandidate, MergeDisposition, SemanticReranker, SemanticScore,
-    assess_merge_candidate, lexical_similarity, retention_score,
+    assess_merge_candidate, lexical_similarity, lexical_similarity_with_terms, lexical_terms,
+    retention_score,
 };
 pub use semantic::{
     ContextNode, DreamRunRecord, MemoryChange, MemoryChangeSet, MemorySchemaDefinition,
