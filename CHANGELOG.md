@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.0 — 2026-10-02
+
+- Bound daemon frames, absolute read deadlines, writes and concurrent connections.
+- Migrate to SQLite schema 8 with durable mutation request receipts, conflict detection and explicit unknown outcomes.
+- Expose request.status for reconciliation; completed receipts expire after seven days, uncertain receipts remain protected.
+
+
 ## 0.7.0 - 2026-10-01
 
 - Promote progressive memory retrieval to the primary runtime contract through `memory.search`, `memory.timeline` and `memory.get`.

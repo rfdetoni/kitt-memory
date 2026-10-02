@@ -24,7 +24,7 @@ mod semantic;
 
 pub use semantic::TimelineMemoryQuery;
 
-const STORE_SCHEMA_VERSION: i64 = 7;
+const STORE_SCHEMA_VERSION: i64 = 8;
 const MEMORY_COLUMNS: &str = "m.id,m.namespace,m.workspace_id,m.kind,m.content,m.normalized_content,m.status,m.sensitivity,m.scope,m.scope_key,m.importance,m.confidence,m.created_at,m.updated_at,m.last_accessed_at,m.access_count,m.valid_from,m.valid_until,m.supersedes_id,m.content_hash,m.pinned,m.metadata_json";
 
 fn ensure_private_database_file(path: &Path) -> Result<()> {
@@ -59,6 +59,13 @@ fn ensure_private_database_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
+pub enum RequestReceipt {
+    New,
+    Pending,
+    Conflict,
+    Completed(String),
+}
+
 pub struct SqliteMemoryStore {
     path: PathBuf,
     writer: Mutex<Connection>,
@@ -82,6 +89,80 @@ impl SqliteMemoryStore {
         }
         store.prune_expired()?;
         Ok(store)
+    }
+
+    /// Admit a mutation before applying it; an uncertain outcome is never evicted.
+    pub fn begin_request(&self, id: &str, digest: &str) -> Result<RequestReceipt> {
+        let mut conn = self.writer_conn()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        let prior: Option<(String, Option<String>)> = tx
+            .query_row(
+                "SELECT digest,response FROM request_receipts WHERE request_id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(storage)?;
+        if let Some((previous, response)) = prior {
+            return Ok(if previous != digest {
+                RequestReceipt::Conflict
+            } else if let Some(response) = response {
+                RequestReceipt::Completed(response)
+            } else {
+                RequestReceipt::Pending
+            });
+        }
+        tx.execute(
+            "DELETE FROM request_receipts WHERE response IS NOT NULL AND created_at < ?1",
+            [now_epoch().saturating_sub(7 * 24 * 3600)],
+        )
+        .map_err(storage)?;
+        let (count, bytes): (i64, i64) = tx.query_row(
+            "SELECT COUNT(*),COALESCE(SUM(CASE WHEN response IS NULL THEN 1048576 ELSE length(CAST(response AS BLOB)) END),0) FROM request_receipts",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(storage)?;
+        if count >= 10000 || bytes + 1048576 > 64 * 1024 * 1024 {
+            return Err(MemoryError::Storage(
+                "request receipt capacity exhausted".into(),
+            ));
+        }
+        tx.execute(
+            "INSERT INTO request_receipts(request_id,digest,created_at) VALUES(?1,?2,?3)",
+            params![id, digest, now_epoch()],
+        )
+        .map_err(storage)?;
+        tx.commit().map_err(storage)?;
+        Ok(RequestReceipt::New)
+    }
+
+    pub fn request_status(&self, id: &str) -> Result<Option<String>> {
+        let receipt: Option<Option<String>> = self
+            .conn()?
+            .query_row(
+                "SELECT response FROM request_receipts WHERE request_id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        Ok(receipt.map(|response| response.unwrap_or_default()))
+    }
+
+    pub fn finish_request(&self, id: &str, response: &str) -> Result<()> {
+        if response.len() > 1024 * 1024 - 512 {
+            return Err(MemoryError::Storage(
+                "request receipt response exceeds frame limit".into(),
+            ));
+        }
+        self.writer_conn()?
+            .execute(
+                "UPDATE request_receipts SET response=?2 WHERE request_id=?1 AND response IS NULL",
+                params![id, response],
+            )
+            .map_err(storage)?;
+        Ok(())
     }
 
     fn open_connection(path: &Path) -> Result<Connection> {
@@ -1107,6 +1188,9 @@ fn migrate(conn: &mut Connection) -> std::result::Result<(), rusqlite::Error> {
              CREATE INDEX IF NOT EXISTS idx_memory_receipts_trace ON memory_consumption_receipts(recall_trace_id,consumed_at);
              CREATE INDEX IF NOT EXISTS idx_memory_jobs_claim ON memory_jobs(phase,status,next_retry_at,lease_until,created_at);"
         )?;
+    }
+    if current < 8 {
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS request_receipts(request_id TEXT PRIMARY KEY,digest TEXT NOT NULL,response TEXT,created_at INTEGER NOT NULL);CREATE INDEX IF NOT EXISTS idx_request_receipts_age ON request_receipts(created_at);")?;
     }
     if current < STORE_SCHEMA_VERSION {
         tx.execute("UPDATE schema_info SET version=?1", [STORE_SCHEMA_VERSION])?;

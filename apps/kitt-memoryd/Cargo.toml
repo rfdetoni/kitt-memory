@@ -11,3 +11,5 @@ kitt-memory-sqlite = { path = "../../crates/kitt-memory-sqlite" }
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
+sha2.workspace = true
+hex.workspace = true

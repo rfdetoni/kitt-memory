@@ -4,22 +4,27 @@ use kitt_memory_core::{
     NewConcept, NewCorrection, NewMemory, RecallQuery, RecallTrace, SemanticMemoryStore,
     Sensitivity, assess_evidence, hash_normalized, now_epoch,
 };
-use kitt_memory_sqlite::{SqliteMemoryStore, TimelineMemoryQuery};
+use kitt_memory_sqlite::{RequestReceipt, SqliteMemoryStore, TimelineMemoryQuery};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     env,
     fs::{self, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 use uuid::Uuid;
 
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
+const MAX_CONNECTIONS: usize = 64;
 const DEFAULT_ADDR: &str = "127.0.0.1:41829";
 
 #[derive(Debug, Deserialize)]
@@ -39,7 +44,7 @@ struct Frame {
     envelope: Envelope,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ResponseEnvelope {
     version: u16,
     id: String,
@@ -573,6 +578,20 @@ fn manage(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
         .cloned()
         .unwrap_or_else(|| json!({}));
     match operation {
+        "request.status" => {
+            let id = as_str(&args, "request_id")?;
+            if id.is_empty() || id.len() > 256 {
+                return Err("invalid request_id".into());
+            }
+            let saved = store.request_status(id).map_err(|e| e.to_string())?;
+            Ok(match saved {
+                None => json!({"state":"not_found"}),
+                Some(value) if value.is_empty() => json!({"state":"outcome_unknown"}),
+                Some(value) => {
+                    json!({"state":"completed", "response":serde_json::from_str::<Value>(&value).map_err(|e| e.to_string())?})
+                }
+            })
+        }
         "list" => {
             let namespace = args
                 .get("namespace")
@@ -964,7 +983,7 @@ fn manage(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
     }
 }
 
-fn handle(store: &SqliteMemoryStore, frame: Frame, token: &str) -> ResponseEnvelope {
+fn handle_authorized(store: &SqliteMemoryStore, frame: Frame, token: &str) -> ResponseEnvelope {
     if frame.token != token {
         return error(
             Some(&frame.envelope.id),
@@ -1150,30 +1169,118 @@ fn handle(store: &SqliteMemoryStore, frame: Frame, token: &str) -> ResponseEnvel
     }
 }
 
-fn serve_connection(mut stream: TcpStream, store: Arc<SqliteMemoryStore>, token: Arc<String>) {
-    let clone = match stream.try_clone() {
-        Ok(value) => value,
-        Err(_) => return,
-    };
-    let mut reader = BufReader::new(clone);
-    let mut line = Vec::new();
-    match reader.read_until(b'\n', &mut line) {
-        Ok(0) | Err(_) => return,
-        Ok(_) => {}
+fn handle(store: &SqliteMemoryStore, frame: Frame, token: &str) -> ResponseEnvelope {
+    if frame.token != token {
+        return error(None, "unauthorized", "invalid authentication");
     }
-    if line.len() > MAX_FRAME_BYTES + 1 {
-        let _ = writeln!(
-            stream,
-            "{}",
-            serde_json::to_string(&error(
-                None,
-                "frame_too_large",
-                "request exceeds frame limit"
-            ))
-            .unwrap()
-        );
+    if frame.envelope.version != 1
+        || frame.envelope.id.trim().is_empty()
+        || frame.envelope.id.len() > 256
+    {
+        return error(None, "invalid_request", "invalid envelope");
+    }
+    let mutating = matches!(
+        frame.envelope.kind.as_str(),
+        "memory.remember.request" | "memory.forget.request"
+    ) || (frame.envelope.kind == "memory.manage.request"
+        && !matches!(
+            frame
+                .envelope
+                .payload
+                .get("operation")
+                .and_then(Value::as_str),
+            Some(
+                "list"
+                    | "get"
+                    | "dream.last"
+                    | "receipt.list"
+                    | "evidence.assess"
+                    | "request.status"
+            )
+        ));
+    if !mutating {
+        return handle_authorized(store, frame, token);
+    }
+    let id = frame.envelope.id.clone();
+    let input =
+        serde_json::to_vec(&(frame.envelope.kind.as_str(), &frame.envelope.payload)).unwrap();
+    let digest = hex::encode(Sha256::digest(&input));
+    match store.begin_request(&id, &digest) {
+        Ok(RequestReceipt::Completed(response)) => {
+            return serde_json::from_str(&response).unwrap_or_else(|_| {
+                error(Some(&id), "receipt_corrupt", "invalid stored response")
+            });
+        }
+        Ok(RequestReceipt::Pending) => {
+            return error(
+                Some(&id),
+                "outcome_unknown",
+                "mutation already admitted; reconcile before issuing a new request",
+            );
+        }
+        Ok(RequestReceipt::Conflict) => {
+            return error(
+                Some(&id),
+                "request_id_conflict",
+                "request ID reused with different payload",
+            );
+        }
+        Err(e) => return error(Some(&id), "receipt_unavailable", e.to_string()),
+        Ok(RequestReceipt::New) => {}
+    }
+    let reply = handle_authorized(store, frame, token);
+    if let Err(e) = store.finish_request(&id, &serde_json::to_string(&reply).unwrap()) {
+        return error(Some(&id), "outcome_unknown", e.to_string());
+    }
+    reply
+}
+
+struct ConnectionPermit(Arc<AtomicUsize>);
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn read_frame(stream: &mut TcpStream, timeout: Duration) -> std::io::Result<Vec<u8>> {
+    let deadline = Instant::now() + timeout;
+    let mut line = Vec::new();
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::TimedOut))?;
+        stream.set_read_timeout(Some(remaining))?;
+        let mut chunk = [0u8; 8192];
+        let limit = chunk.len().min(MAX_FRAME_BYTES + 1 - line.len());
+        let count = stream.read(&mut chunk[..limit])?;
+        if count == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        if let Some(end) = chunk[..count].iter().position(|byte| *byte == b'\n') {
+            line.extend_from_slice(&chunk[..=end]);
+            if line.len() > MAX_FRAME_BYTES {
+                return Err(std::io::ErrorKind::InvalidData.into());
+            }
+            return Ok(line);
+        }
+        line.extend_from_slice(&chunk[..count]);
+        if line.len() > MAX_FRAME_BYTES {
+            return Err(std::io::ErrorKind::InvalidData.into());
+        }
+    }
+}
+
+fn serve_connection(mut stream: TcpStream, store: Arc<SqliteMemoryStore>, token: Arc<String>) {
+    if stream
+        .set_write_timeout(Some(Duration::from_secs(8)))
+        .is_err()
+    {
         return;
     }
+    let mut line = match read_frame(&mut stream, Duration::from_secs(2)) {
+        Ok(line) => line,
+        Err(_) => return,
+    };
     while matches!(line.last(), Some(b'\n' | b'\r')) {
         line.pop();
     }
@@ -1181,7 +1288,15 @@ fn serve_connection(mut stream: TcpStream, store: Arc<SqliteMemoryStore>, token:
         Ok(frame) => handle(&store, frame, &token),
         Err(e) => error(None, "invalid_json", e.to_string()),
     };
-    if let Ok(encoded) = serde_json::to_string(&reply) {
+    if let Ok(mut encoded) = serde_json::to_string(&reply) {
+        if encoded.len() + 1 > MAX_FRAME_BYTES {
+            encoded = serde_json::to_string(&error(
+                reply.correlation_id.as_deref(),
+                "frame_too_large",
+                "response exceeds frame limit",
+            ))
+            .unwrap();
+        }
         let _ = stream.write_all(encoded.as_bytes());
         let _ = stream.write_all(b"\n");
     }
@@ -1221,15 +1336,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(SqliteMemoryStore::open(db_path)?);
     let listener = TcpListener::bind(&addr)?;
     eprintln!("kitt-memoryd listening on {addr}");
+    let active = Arc::new(AtomicUsize::new(0));
     for incoming in listener.incoming() {
         match incoming {
             Ok(stream) => {
+                if active
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                        (count < MAX_CONNECTIONS).then_some(count + 1)
+                    })
+                    .is_err()
+                {
+                    drop(stream);
+                    continue;
+                }
+                let permit = ConnectionPermit(Arc::clone(&active));
                 let store = Arc::clone(&store);
                 let token = Arc::clone(&token);
-                thread::spawn(move || serve_connection(stream, store, token));
+                let _ = thread::Builder::new()
+                    .name("memory-request".into())
+                    .spawn(move || {
+                        let _permit = permit;
+                        serve_connection(stream, store, token);
+                    });
             }
             Err(error) => eprintln!("kitt-memoryd accept error: {error}"),
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+    fn pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (client, server)
+    }
+    #[test]
+    fn oversized_frames_are_rejected_before_unbounded_allocation() {
+        let (mut client, mut server) = pair();
+        let reader = thread::spawn(move || read_frame(&mut server, Duration::from_secs(1)));
+        let _ = client.write_all(&vec![b'x'; MAX_FRAME_BYTES + 1]);
+        assert_eq!(
+            reader.join().unwrap().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
+    #[test]
+    fn trickled_frames_cannot_extend_the_absolute_deadline() {
+        let (mut client, mut server) = pair();
+        let started = Instant::now();
+        let reader = thread::spawn(move || read_frame(&mut server, Duration::from_millis(50)));
+        for _ in 0..10 {
+            if client.write_all(b"x").is_err() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(reader.join().unwrap().is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 }
