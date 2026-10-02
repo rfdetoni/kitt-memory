@@ -250,8 +250,8 @@ impl SqliteMemoryStore {
                 drop(tx);
                 drop(conn);
                 if let Ok(mut queue) = self.trace_buffer.lock() {
-                    for trace in batch.into_iter().rev() {
-                        queue.push_front(trace);
+                    for trace in batch.iter().rev() {
+                        queue.push_front(trace.clone());
                     }
                 }
                 return Err(storage(error));
