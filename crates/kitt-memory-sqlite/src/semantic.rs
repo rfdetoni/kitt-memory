@@ -107,6 +107,24 @@ impl SqliteMemoryStore {
             .collect())
     }
 
+    /// Mark explicitly hydrated memories as accessed. Search presentation alone never calls this.
+    pub fn touch_memories(&self, memory_ids: &[String]) -> Result<usize> {
+        if memory_ids.is_empty() {
+            return Ok(0);
+        }
+        let bounded = memory_ids.iter().take(128).cloned().collect::<Vec<_>>();
+        let placeholders = (0..bounded.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "UPDATE memories SET last_accessed_at=?,access_count=access_count+1 WHERE id IN ({placeholders})"
+        );
+        let mut values = Vec::<rusqlite::types::Value>::with_capacity(bounded.len() + 1);
+        values.push(now_epoch().into());
+        values.extend(bounded.into_iter().map(rusqlite::types::Value::from));
+        self.writer_conn()?
+            .execute(&sql, rusqlite::params_from_iter(values))
+            .map_err(storage)
+    }
+
     /// Fetch provenance for a bounded set of memories in one query.
     pub fn sources_for_memories(
         &self,
