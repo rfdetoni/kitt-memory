@@ -113,7 +113,10 @@ impl SqliteMemoryStore {
             return Ok(0);
         }
         let bounded = memory_ids.iter().take(128).cloned().collect::<Vec<_>>();
-        let placeholders = (0..bounded.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+        let placeholders = (0..bounded.len())
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
         let sql = format!(
             "UPDATE memories SET last_accessed_at=?,access_count=access_count+1 WHERE id IN ({placeholders})"
         );
