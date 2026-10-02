@@ -235,6 +235,10 @@ pub struct MemoryRecord {
     pub supersedes_id: Option<String>,
     pub content_hash: String,
     pub pinned: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub gist: String,
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub tokens_est: usize,
     pub metadata_json: String,
 }
 
@@ -288,6 +292,8 @@ impl MemoryRecord {
         }
         record.normalized_content = normalize(&record.content);
         record.content_hash = hash_normalized(&record.normalized_content);
+        record.gist = gist_for_content(&record.content, 180);
+        record.tokens_est = estimate_tokens(&record.content);
         Ok(record)
     }
 }
@@ -335,6 +341,8 @@ impl NewMemory {
             supersedes_id: None,
             content_hash: String::new(),
             pinned: self.pinned,
+            gist: String::new(),
+            tokens_est: 0,
             metadata_json: self.metadata_json,
         }
         .canonicalized_for_storage()
@@ -466,6 +474,32 @@ pub fn estimate_tokens(value: &str) -> usize {
         .div_ceil(4)
         .saturating_add(non_ascii.saturating_mul(2))
         .saturating_add(punctuation.div_ceil(12))
+}
+
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
+}
+
+/// Produces a compact, deterministic gist at a sentence/line boundary.
+pub fn gist_for_content(value: &str, max_chars: usize) -> String {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let hard = trimmed
+        .char_indices()
+        .nth(max_chars.saturating_sub(1))
+        .map(|(index, _)| index)
+        .unwrap_or(trimmed.len());
+    let prefix = &trimmed[..hard];
+    let boundary = prefix
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| matches!(ch, '.' | '!' | '?' | '\n'))
+        .map(|(index, ch)| index + ch.len_utf8())
+        .filter(|index| *index >= hard / 2)
+        .unwrap_or(hard);
+    format!("{}…", prefix[..boundary].trim_end())
 }
 
 fn validate_identity(namespace: &str, workspace_id: &str) -> Result<()> {
