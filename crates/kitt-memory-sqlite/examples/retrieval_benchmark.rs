@@ -1,6 +1,4 @@
-use kitt_memory_core::{
-    MemoryKind, MemoryScope, MemoryStore, NewMemory, RecallQuery, Sensitivity,
-};
+use kitt_memory_core::{MemoryKind, MemoryScope, MemoryStore, NewMemory, RecallQuery, Sensitivity};
 use kitt_memory_sqlite::SqliteMemoryStore;
 use std::path::Path;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
