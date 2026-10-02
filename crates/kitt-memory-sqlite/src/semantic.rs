@@ -141,7 +141,7 @@ impl SqliteMemoryStore {
              ORDER BY memory_id ASC,observed_at DESC,id ASC"
         );
         let rows = self.with_conn(|conn| {
-            let mut stmt = conn.prepare_cached(&sql)?;
+            let mut stmt = conn.prepare(&sql)?;
             stmt.query_map(
                 rusqlite::params_from_iter(
                     bounded.iter().cloned().map(rusqlite::types::Value::from),
