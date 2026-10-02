@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.1 — 2026-10-02
+
+- Isolate `kitt-memoryd` management dispatch into its own module without changing the Protocol 0.9/wire-v1 surface or semantic-memory authority.
+- Publish the post-0.9.0 runtime refactor under a new immutable patch version; dependencies and SQLite schema remain unchanged.
+
 ## 0.9.0 — 2026-10-02
 
 - Advance SQLite to schema v9 with normalized-content FTS5, derived `gist` / `tokens_est` fields and collision-safe rehash/dedup migration.
