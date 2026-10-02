@@ -468,18 +468,11 @@ fn progressive_search(store: &SqliteMemoryStore, payload: &Value) -> Result<Valu
         hit.insert("snippet".into(), json!(snippet));
         hit.insert("importance".into(), json!(record.importance));
         hit.insert("confidence".into(), json!(record.confidence));
-        if common_sensitivity.is_none() {
-            hit.insert("sensitivity".into(), json!(record.sensitivity.as_db()));
-        }
-        if common_scope.is_none() {
-            hit.insert("scope".into(), json!(record.scope.as_db()));
-            if let Some(scope_key) = &record.scope_key {
-                hit.insert("scope_key".into(), json!(scope_key));
-            }
-        }
-        if include_provenance {
-            hit.insert("provenance".into(), json!(sources));
-        }
+        hit.insert("sensitivity".into(), json!(record.sensitivity.as_db()));
+        hit.insert("scope".into(), json!(record.scope.as_db()));
+        hit.insert("scope_key".into(), json!(record.scope_key));
+        hit.insert("token_estimate".into(), json!(token_estimate(&snippet)));
+        hit.insert("provenance".into(), json!(sources));
         hits.push(Value::Object(hit));
     }
 
@@ -605,9 +598,7 @@ fn progressive_get(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, 
         selected.push(record.id.clone());
         let mut value = serde_json::Map::new();
         value.insert("record".into(), json!(record));
-        if include_provenance {
-            value.insert("provenance".into(), json!(sources));
-        }
+        value.insert("provenance".into(), json!(sources));
         records.push(Value::Object(value));
     }
     store
@@ -724,12 +715,11 @@ fn progressive_timeline(store: &SqliteMemoryStore, payload: &Value) -> Result<Va
         hit.insert("updated_at".into(), json!(record.updated_at));
         hit.insert("sensitivity".into(), json!(record.sensitivity.as_db()));
         hit.insert("scope".into(), json!(record.scope.as_db()));
-        if let Some(scope_key) = &record.scope_key {
-            hit.insert("scope_key".into(), json!(scope_key));
-        }
-        if include_provenance {
-            hit.insert("provenance".into(), json!(sources));
-        }
+        hit.insert("scope_key".into(), json!(record.scope_key));
+        hit.insert("importance".into(), json!(record.importance));
+        hit.insert("confidence".into(), json!(record.confidence));
+        hit.insert("token_estimate".into(), json!(token_estimate(&snippet)));
+        hit.insert("provenance".into(), json!(sources));
         hits.push(Value::Object(hit));
     }
     let trace_id = progressive_trace(
