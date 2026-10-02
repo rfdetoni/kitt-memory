@@ -206,6 +206,8 @@ mod tests {
             supersedes_id: None,
             content_hash: String::new(),
             pinned: false,
+            gist: String::new(),
+            tokens_est: 0,
             metadata_json: "{}".into(),
         }
     }
