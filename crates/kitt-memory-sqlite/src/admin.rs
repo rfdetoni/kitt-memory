@@ -91,7 +91,7 @@ impl SqliteMemoryStore {
     }
 
     pub fn touch_records(&self, ids: &[String]) -> Result<()> {
-        self.touch_access(ids.iter().map(String::as_str))
+        self.touch_memories(ids).map(|_| ())
     }
 
     pub fn archive_workspace(
