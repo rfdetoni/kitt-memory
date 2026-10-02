@@ -26,7 +26,7 @@ Baselines are deterministic with respect to stored semantic state and expose opt
 Progressive retrieval keeps the existing v1 response fields for compatibility and adds optional request controls:
 - `include_provenance` to avoid provenance hydration when it is not needed;
 - `exclude_ids` on search for session-level duplicate suppression;
-- `context_hints` / `common` response extensions for compact navigation metadata.
+- `include_context_hints` to opt into `context_hints` / `common` navigation metadata without changing the default v1 response shape.
 
 The daemon now uses a fixed worker pool, bounded connection queue, keep-alive request loops and constant-time token comparison. Recall traces are buffered off the search hot path and flushed in short batches.
 
