@@ -166,9 +166,9 @@ impl SqliteMemoryStore {
         Ok(())
     }
 
-    pub fn periodic_maintenance(&self) -> Result<()> {
+    pub fn periodic_maintenance(&self) -> Result<usize> {
         self.flush_recall_traces()?;
-        self.prune_expired()?;
+        let expired = self.prune_expired()?;
         let cutoff = now_epoch().saturating_sub(30 * 24 * 3600);
         let conn = self.writer_conn()?;
         conn.execute(
@@ -193,12 +193,12 @@ impl SqliteMemoryStore {
              PRAGMA wal_checkpoint(PASSIVE);",
         )
         .map_err(storage)?;
-        Ok(())
+        Ok(expired)
     }
 
     pub fn maintenance(&self, namespace: &str, workspace_id: &str) -> Result<(usize, usize)> {
-        self.periodic_maintenance()?;
+        let expired = self.periodic_maintenance()?;
         let duplicates = self.consolidate_exact_duplicates(namespace, workspace_id)?;
-        Ok((0, duplicates))
+        Ok((expired, duplicates))
     }
 }
