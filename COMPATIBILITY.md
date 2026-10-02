@@ -1,6 +1,6 @@
 # K.I.T.T. Memory — current ecosystem contract
 
-Version 0.5.x intentionally drops historical Agent-memory compatibility.
+Version 0.9.x intentionally drops historical Agent-memory compatibility.
 
 ## Authority
 
@@ -28,3 +28,12 @@ before a new write. Query `memory.manage.request` with operation `request.status
 and `arguments.request_id`. Receipt data is bounded to 10,000 rows / 64 MiB;
 completed receipts expire after seven days and pending receipts are never evicted.
 This is a duplicate-dispatch barrier, not a claim of exactly-once transactions.
+
+
+## 0.9.0 retrieval and schema changes
+
+SQLite schema 9 is forward-only; stop an older daemon before upgrading. The migration is transactional, recomputes normalized content/hashes/gists/token estimates and resolves any newly colliding active identities without deleting historical rows. Duplicate resolution preserves the most restrictive sensitivity.
+
+Protocol wire version remains 1. Existing `memory.search`, `memory.timeline` and `memory.get` response fields remain present. New fields and controls are additive: `include_provenance`, `exclude_ids`, `context_hints`, `common`, `memory.baseline.request`, `baseline_revision` and `etag`.
+
+Search and ordinary recall do not mutate access telemetry. Explicit hydration and receipts marked referenced/used-for-action are the reinforcement points. Baseline revisions intentionally ignore access-only updates.
