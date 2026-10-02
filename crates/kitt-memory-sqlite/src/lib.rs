@@ -320,8 +320,7 @@ impl SqliteMemoryStore {
         lexical_confidence.sort_by(|left, right| right.total_cmp(left));
         let first_lexical = lexical_confidence.first().copied().unwrap_or(0.0);
         let second_lexical = lexical_confidence.get(1).copied().unwrap_or(0.0);
-        let lexical_margin_high =
-            first_lexical >= 0.45 && first_lexical - second_lexical >= 0.20;
+        let lexical_margin_high = first_lexical >= 0.45 && first_lexical - second_lexical >= 0.20;
         let semantic_scores = if lexical_margin_high {
             HashMap::new()
         } else {
@@ -377,7 +376,6 @@ impl SqliteMemoryStore {
             .map(|(_, m)| m)
             .collect())
     }
-
 }
 
 impl MemoryStore for SqliteMemoryStore {
