@@ -15,10 +15,7 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -177,17 +174,6 @@ fn as_str<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
 
 fn token_estimate(text: &str) -> u64 {
     u64::try_from(estimate_tokens(text)).unwrap_or(u64::MAX)
-}
-
-fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
-    if value.len() <= max_bytes {
-        return value.to_string();
-    }
-    let mut end = max_bytes.min(value.len());
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].to_string()
 }
 
 fn centered_snippet(value: &str, query: &str, max_tokens: u64) -> String {
@@ -1190,7 +1176,7 @@ fn manage(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
 }
 
 fn handle_authorized(store: &SqliteMemoryStore, frame: Frame, token: &str) -> ResponseEnvelope {
-    if frame.token != token {
+    if !constant_time_eq(&frame.token, token) {
         return error(
             Some(&frame.envelope.id),
             "unauthorized",
@@ -1376,7 +1362,7 @@ fn handle_authorized(store: &SqliteMemoryStore, frame: Frame, token: &str) -> Re
 }
 
 fn handle(store: &SqliteMemoryStore, frame: Frame, token: &str) -> ResponseEnvelope {
-    if frame.token != token {
+    if !constant_time_eq(&frame.token, token) {
         return error(None, "unauthorized", "invalid authentication");
     }
     if frame.envelope.version != 1
@@ -1441,13 +1427,6 @@ fn handle(store: &SqliteMemoryStore, frame: Frame, token: &str) -> ResponseEnvel
     reply
 }
 
-struct ConnectionPermit(Arc<AtomicUsize>);
-impl Drop for ConnectionPermit {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
 fn read_frame(stream: &mut TcpStream, timeout: Duration) -> std::io::Result<Vec<u8>> {
     let deadline = Instant::now() + timeout;
     let mut line = Vec::new();
@@ -1483,31 +1462,42 @@ fn serve_connection(mut stream: TcpStream, store: Arc<SqliteMemoryStore>, token:
     {
         return;
     }
-    let mut line = match read_frame(&mut stream, Duration::from_secs(2)) {
-        Ok(line) => line,
-        Err(_) => return,
-    };
-    while matches!(line.last(), Some(b'\n' | b'\r')) {
-        line.pop();
-    }
-    let reply = match serde_json::from_slice::<Frame>(&line) {
-        Ok(frame) => handle(&store, frame, &token),
-        Err(e) => error(None, "invalid_json", e.to_string()),
-    };
-    if let Ok(mut encoded) = serde_json::to_string(&reply) {
+    loop {
+        let mut line = match read_frame(&mut stream, Duration::from_secs(30)) {
+            Ok(line) => line,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return;
+            }
+            Err(_) => return,
+        };
+        while matches!(line.last(), Some(b'\n' | b'\r')) {
+            line.pop();
+        }
+        let reply = match serde_json::from_slice::<Frame>(&line) {
+            Ok(frame) => handle(&store, frame, &token),
+            Err(error) => error(None, "invalid_json", error.to_string()),
+        };
+        let Ok(mut encoded) = serde_json::to_string(&reply) else {
+            return;
+        };
         if encoded.len() + 1 > MAX_FRAME_BYTES {
             encoded = serde_json::to_string(&error(
                 reply.correlation_id.as_deref(),
                 "frame_too_large",
                 "response exceeds frame limit",
             ))
-            .unwrap();
+            .unwrap_or_else(|_| "{\"version\":1,\"id\":\"error\",\"kind\":\"system.error\",\"payload\":{}}".into());
         }
-        let _ = stream.write_all(encoded.as_bytes());
-        let _ = stream.write_all(b"\n");
+        if stream.write_all(encoded.as_bytes()).is_err() || stream.write_all(b"\n").is_err() {
+            return;
+        }
     }
 }
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = env::args().skip(1).collect::<Vec<_>>();
     if args.iter().any(|arg| arg == "--version" || arg == "-V") {
@@ -1542,42 +1532,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(SqliteMemoryStore::open(db_path)?);
     let listener = TcpListener::bind(&addr)?;
     eprintln!("kitt-memoryd listening on {addr}");
-    let active = Arc::new(AtomicUsize::new(0));
+
+    let worker_count = thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(4)
+        .clamp(2, 8);
+    let (sender, receiver) = mpsc::sync_channel::<TcpStream>(MAX_CONNECTIONS);
+    let receiver = Arc::new(Mutex::new(receiver));
+    for index in 0..worker_count {
+        let receiver = Arc::clone(&receiver);
+        let store = Arc::clone(&store);
+        let token = Arc::clone(&token);
+        thread::Builder::new()
+            .name(format!("memory-worker-{index}"))
+            .spawn(move || {
+                loop {
+                    let stream = {
+                        let Ok(receiver) = receiver.lock() else {
+                            return;
+                        };
+                        receiver.recv()
+                    };
+                    match stream {
+                        Ok(stream) => serve_connection(stream, Arc::clone(&store), Arc::clone(&token)),
+                        Err(_) => return,
+                    }
+                }
+            })?;
+    }
+
+    {
+        let maintenance_store = Arc::clone(&store);
+        thread::Builder::new()
+            .name("memory-maintenance".into())
+            .spawn(move || loop {
+                thread::sleep(Duration::from_secs(5));
+                if let Err(error) = maintenance_store.flush_recall_traces() {
+                    eprintln!("kitt-memoryd trace flush error: {error}");
+                }
+            })?;
+    }
+
     for incoming in listener.incoming() {
         match incoming {
             Ok(stream) => {
-                // compare_exchange works on MSRV 1.88 and on stable Rust, where
-                // fetch_update has been renamed/deprecated.
-                let admitted = loop {
-                    let count = active.load(Ordering::Acquire);
-                    if count >= MAX_CONNECTIONS {
-                        break false;
+                if let Err(error) = sender.try_send(stream) {
+                    match error {
+                        mpsc::TrySendError::Full(stream)
+                        | mpsc::TrySendError::Disconnected(stream) => drop(stream),
                     }
-                    if active
-                        .compare_exchange_weak(
-                            count,
-                            count + 1,
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                        )
-                        .is_ok()
-                    {
-                        break true;
-                    }
-                };
-                if !admitted {
-                    drop(stream);
-                    continue;
                 }
-                let permit = ConnectionPermit(Arc::clone(&active));
-                let store = Arc::clone(&store);
-                let token = Arc::clone(&token);
-                let _ = thread::Builder::new()
-                    .name("memory-request".into())
-                    .spawn(move || {
-                        let _permit = permit;
-                        serve_connection(stream, store, token);
-                    });
             }
             Err(error) => eprintln!("kitt-memoryd accept error: {error}"),
         }
