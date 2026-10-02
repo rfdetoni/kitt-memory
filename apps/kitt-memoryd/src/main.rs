@@ -1,9 +1,9 @@
 use kitt_memory_core::{
     BaselineQuery, DreamRunRecord, EvidenceOrigin, KnowledgeRelation, KnowledgeStore,
-    MemoryConsumptionReceipt,
-    MemoryJob, MemoryKind, MemoryRecord, MemoryScope, MemorySource, MemoryStatus, MemoryStore,
-    NewConcept, NewCorrection, NewMemory, RecallQuery, RecallTrace, SemanticMemoryStore,
-    Sensitivity, assess_evidence, estimate_tokens, gist_for_content, hash_normalized, now_epoch,
+    MemoryConsumptionReceipt, MemoryJob, MemoryKind, MemoryRecord, MemoryScope, MemorySource,
+    MemoryStatus, MemoryStore, NewConcept, NewCorrection, NewMemory, RecallQuery, RecallTrace,
+    SemanticMemoryStore, Sensitivity, assess_evidence, estimate_tokens, gist_for_content,
+    hash_normalized, now_epoch,
 };
 use kitt_memory_sqlite::{RequestReceipt, SqliteMemoryStore, TimelineMemoryQuery};
 use serde::{Deserialize, Serialize};
@@ -187,9 +187,7 @@ fn centered_snippet(value: &str, query: &str, max_tokens: u64) -> String {
     let haystack = value.to_ascii_lowercase();
     let match_at = query
         .split_whitespace()
-        .map(|term| {
-            term.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-')
-        })
+        .map(|term| term.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-'))
         .filter(|term| term.chars().count() >= 2)
         .filter_map(|term| haystack.find(&term.to_ascii_lowercase()))
         .min();
@@ -1567,7 +1565,9 @@ fn serve_connection(mut stream: TcpStream, store: Arc<SqliteMemoryStore>, token:
                 "frame_too_large",
                 "response exceeds frame limit",
             ))
-            .unwrap_or_else(|_| "{\"version\":1,\"id\":\"error\",\"kind\":\"system.error\",\"payload\":{}}".into());
+            .unwrap_or_else(|_| {
+                "{\"version\":1,\"id\":\"error\",\"kind\":\"system.error\",\"payload\":{}}".into()
+            });
         }
         if stream.write_all(encoded.as_bytes()).is_err() || stream.write_all(b"\n").is_err() {
             return;
@@ -1630,7 +1630,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         receiver.recv()
                     };
                     match stream {
-                        Ok(stream) => serve_connection(stream, Arc::clone(&store), Arc::clone(&token)),
+                        Ok(stream) => {
+                            serve_connection(stream, Arc::clone(&store), Arc::clone(&token))
+                        }
                         Err(_) => return,
                     }
                 }
