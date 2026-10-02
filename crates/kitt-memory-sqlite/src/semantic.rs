@@ -137,7 +137,10 @@ impl SqliteMemoryStore {
             return Ok(HashMap::new());
         }
         let bounded = memory_ids.iter().take(128).cloned().collect::<Vec<_>>();
-        let placeholders = (0..bounded.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+        let placeholders = (0..bounded.len())
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
         let sql = format!(
             "SELECT id,memory_id,source_kind,source_id,source_uri,source_digest,relationship,source_revision,observed_at,valid_from,valid_until
              FROM memory_sources WHERE memory_id IN ({placeholders})
