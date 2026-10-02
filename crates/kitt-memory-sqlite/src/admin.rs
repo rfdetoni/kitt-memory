@@ -176,11 +176,8 @@ impl SqliteMemoryStore {
             [cutoff],
         )
         .map_err(storage)?;
-        conn.execute(
-            "DELETE FROM recall_traces WHERE created_at < ?1",
-            [cutoff],
-        )
-        .map_err(storage)?;
+        conn.execute("DELETE FROM recall_traces WHERE created_at < ?1", [cutoff])
+            .map_err(storage)?;
         conn.execute(
             "DELETE FROM memory_jobs
              WHERE status IN ('SUCCEEDED','FAILED') AND updated_at < ?1",
