@@ -62,8 +62,24 @@ jobs:
           tag="v$current"
           tagged="$(git rev-list -n1 "$tag" 2>/dev/null || true)"
           if [[ -n "$tagged" && "$tagged" != "$head" ]]; then
-            echo "Immutable tag $tag already points to $tagged; expected $head." >&2
-            exit 1
+            if ! git merge-base --is-ancestor "$tagged" "$head"; then
+              echo "Immutable tag $tag at $tagged is not an ancestor of validated main $head." >&2
+              exit 1
+            fi
+            publishable=()
+            while IFS= read -r path; do
+              case "$path" in
+                .github/*|docs/*|tests/*|README.md|README.pt-BR.md|LICENSE|SECURITY.md) ;;
+                *) publishable+=("$path") ;;
+              esac
+            done < <(git diff --name-only "$tagged..$head")
+            if (( ${#publishable[@]} )); then
+              printf 'Same-version main contains publishable changes that require a version bump:\n' >&2
+              printf '  %s\n' "${publishable[@]}" >&2
+              exit 1
+            fi
+            echo "Validated main differs from $tag only in tests/docs/workflows; no package release is required."
+            exit 0
           fi
           if [[ -z "$tagged" ]]; then
             gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/$tag" -f sha="$head" >/dev/null
