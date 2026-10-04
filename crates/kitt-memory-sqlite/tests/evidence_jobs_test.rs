@@ -131,3 +131,48 @@ fn evidence_tiering_blocks_self_reinforcing_sources() {
         assert!(!assessment.learnable);
     }
 }
+
+
+#[test]
+fn running_job_is_reclaimed_after_restart_when_lease_expires() {
+    let db = path();
+    let job_id = {
+        let store = SqliteMemoryStore::open(&db).unwrap();
+        let job = MemoryJob::new("extract", "session-restart", "r1", "7", "restart-digest").unwrap();
+        let enqueued = store.enqueue_memory_job(&job).unwrap();
+        let claimed = store
+            .claim_memory_job("extract", "worker-before-crash", 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.id, enqueued.id);
+        assert_eq!(claimed.attempt, 1);
+        claimed.id
+    };
+
+    std::thread::sleep(std::time::Duration::from_secs(6));
+
+    let restarted = SqliteMemoryStore::open(&db).unwrap();
+    let reclaimed = restarted
+        .claim_memory_job("extract", "worker-after-restart", 5)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reclaimed.id, job_id);
+    assert_eq!(reclaimed.attempt, 2);
+    assert_eq!(reclaimed.lease_owner.as_deref(), Some("worker-after-restart"));
+    assert!(
+        restarted
+            .complete_memory_job(
+                &reclaimed.id,
+                "worker-after-restart",
+                Some("restart-output"),
+            )
+            .unwrap()
+    );
+    assert!(
+        restarted
+            .claim_memory_job("extract", "worker-third", 5)
+            .unwrap()
+            .is_none()
+    );
+    let _ = std::fs::remove_file(db);
+}
