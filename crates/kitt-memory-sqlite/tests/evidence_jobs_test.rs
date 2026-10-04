@@ -132,13 +132,13 @@ fn evidence_tiering_blocks_self_reinforcing_sources() {
     }
 }
 
-
 #[test]
 fn running_job_is_reclaimed_after_restart_when_lease_expires() {
     let db = path();
     let job_id = {
         let store = SqliteMemoryStore::open(&db).unwrap();
-        let job = MemoryJob::new("extract", "session-restart", "r1", "7", "restart-digest").unwrap();
+        let job =
+            MemoryJob::new("extract", "session-restart", "r1", "7", "restart-digest").unwrap();
         let enqueued = store.enqueue_memory_job(&job).unwrap();
         let claimed = store
             .claim_memory_job("extract", "worker-before-crash", 5)
@@ -158,7 +158,10 @@ fn running_job_is_reclaimed_after_restart_when_lease_expires() {
         .unwrap();
     assert_eq!(reclaimed.id, job_id);
     assert_eq!(reclaimed.attempt, 2);
-    assert_eq!(reclaimed.lease_owner.as_deref(), Some("worker-after-restart"));
+    assert_eq!(
+        reclaimed.lease_owner.as_deref(),
+        Some("worker-after-restart")
+    );
     assert!(
         restarted
             .complete_memory_job(
