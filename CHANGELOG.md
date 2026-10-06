@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.2 — 2026-10-06
+
+- Add bounded `receipt.record_batch` management (1–128 receipts), validated before a single SQLite transaction. Preserve monotonic/idempotent receipt updates and test all-or-nothing validation. SQLite schema remains v9.
+
 ## 0.9.1 — 2026-10-02
 
 - Isolate `kitt-memoryd` management dispatch into its own module without changing the Protocol 0.9/wire-v1 surface or semantic-memory authority.
