@@ -5,11 +5,24 @@ use crate::{SqliteMemoryStore, storage};
 
 impl SqliteMemoryStore {
     pub fn record_consumption_receipt(&self, receipt: &MemoryConsumptionReceipt) -> Result<()> {
-        receipt.validate()?;
+        self.record_consumption_receipts(std::slice::from_ref(receipt))
+    }
+
+    pub fn record_consumption_receipts(&self, receipts: &[MemoryConsumptionReceipt]) -> Result<()> {
+        if receipts.is_empty() || receipts.len() > 128 {
+            return Err(MemoryError::Invalid(
+                "receipt batch must contain 1..128 items".into(),
+            ));
+        }
+        for receipt in receipts {
+            receipt.validate()?;
+        }
         self.flush_recall_traces()?;
-        let conn = self.writer_conn()?;
-        conn.execute(
-            "INSERT INTO memory_consumption_receipts(
+        let mut writer = self.writer_conn()?;
+        let conn = writer.transaction().map_err(storage)?;
+        for receipt in receipts {
+            conn.execute(
+                "INSERT INTO memory_consumption_receipts(
                 recall_trace_id,memory_id,consumer,purpose,presented,referenced,
                 used_for_action,outcome,turn_id,consumed_at
              ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
@@ -20,29 +33,31 @@ impl SqliteMemoryStore {
                 used_for_action=MAX(used_for_action,excluded.used_for_action),
                 outcome=CASE WHEN excluded.outcome<>'' THEN excluded.outcome ELSE outcome END,
                 consumed_at=MAX(consumed_at,excluded.consumed_at)",
-            params![
-                receipt.recall_trace_id,
-                receipt.memory_id,
-                receipt.consumer,
-                receipt.purpose,
-                receipt.presented as i64,
-                receipt.referenced as i64,
-                receipt.used_for_action as i64,
-                receipt.outcome,
-                receipt.turn_id,
-                receipt.consumed_at,
-            ],
-        )
-        .map_err(storage)?;
-        if receipt.referenced || receipt.used_for_action {
-            conn.execute(
-                "UPDATE memories
-                 SET last_accessed_at=?1,access_count=access_count+1
-                 WHERE id=?2",
-                params![receipt.consumed_at.max(now_epoch()), receipt.memory_id],
+                params![
+                    receipt.recall_trace_id,
+                    receipt.memory_id,
+                    receipt.consumer,
+                    receipt.purpose,
+                    receipt.presented as i64,
+                    receipt.referenced as i64,
+                    receipt.used_for_action as i64,
+                    receipt.outcome,
+                    receipt.turn_id,
+                    receipt.consumed_at,
+                ],
             )
             .map_err(storage)?;
+            if receipt.referenced || receipt.used_for_action {
+                conn.execute(
+                    "UPDATE memories
+                 SET last_accessed_at=?1,access_count=access_count+1
+                 WHERE id=?2",
+                    params![receipt.consumed_at.max(now_epoch()), receipt.memory_id],
+                )
+                .map_err(storage)?;
+            }
         }
+        conn.commit().map_err(storage)?;
         Ok(())
     }
 

@@ -41,7 +41,22 @@ fn receipts_are_idempotent_and_monotonic() {
         turn_id: "turn-1".into(),
         consumed_at: 2,
     };
-    store.record_consumption_receipt(&receipt).unwrap();
+    let mut invalid = receipt.clone();
+    invalid.consumer = String::new();
+    assert!(
+        store
+            .record_consumption_receipts(&[receipt.clone(), invalid])
+            .is_err()
+    );
+    assert!(
+        store
+            .recent_consumption_receipts("ws", 10)
+            .unwrap()
+            .is_empty()
+    );
+    store
+        .record_consumption_receipts(&[receipt.clone(), receipt.clone()])
+        .unwrap();
     receipt.referenced = true;
     receipt.used_for_action = true;
     receipt.outcome = "validation-passed".into();

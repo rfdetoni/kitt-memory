@@ -257,6 +257,21 @@ pub(super) fn handle(store: &SqliteMemoryStore, payload: &Value) -> Result<Value
                 .map_err(|e| e.to_string())?;
             Ok(json!({"recorded": true}))
         }
+        "receipt.record_batch" => {
+            let values = args
+                .get("receipts")
+                .and_then(Value::as_array)
+                .ok_or("missing receipts array")?;
+            if values.is_empty() || values.len() > 128 {
+                return Err("receipt batch must contain 1..128 items".into());
+            }
+            let receipts: Vec<MemoryConsumptionReceipt> =
+                serde_json::from_value(Value::Array(values.clone())).map_err(|e| e.to_string())?;
+            store
+                .record_consumption_receipts(&receipts)
+                .map_err(|e| e.to_string())?;
+            Ok(json!({"recorded": receipts.len()}))
+        }
         "receipt.list" => {
             let workspace_id = as_str(&args, "workspace_id")?;
             let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize;

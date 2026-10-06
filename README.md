@@ -1,5 +1,11 @@
 # K.I.T.T. Memory
 
+## Release 0.9.2 — execution boundary hardening
+
+Add bounded `receipt.record_batch` management (1–128 receipts), validated before a single SQLite transaction. Preserve monotonic/idempotent receipt updates and test all-or-nothing validation. SQLite schema remains v9.
+
+See [release notes](docs/RELEASE_0.9.2.md).
+
 <p align="center">
   <strong>Persistent local memory engine for the K.I.T.T. ecosystem.</strong><br>
   Rust · SQLite WAL/FTS5 · scope-isolated hybrid retrieval · deterministic baselines · privacy-aware egress
