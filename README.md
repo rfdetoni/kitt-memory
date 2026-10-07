@@ -1,5 +1,11 @@
 # K.I.T.T. Memory
 
+## Release 0.9.3 — Reader pool reuse
+
+Request receipt lookup and concept graph expansion return SQLite readers to the pool on both success and error. Repeated queries no longer drain the pool and reopen connections. Storage schemas and wire framing are unchanged.
+
+See [release notes](docs/RELEASE_0.9.3.md).
+
 ## Release 0.9.2 — execution boundary hardening
 
 Add bounded `receipt.record_batch` management (1–128 receipts), validated before a single SQLite transaction. Preserve monotonic/idempotent receipt updates and test all-or-nothing validation. SQLite schema remains v9.

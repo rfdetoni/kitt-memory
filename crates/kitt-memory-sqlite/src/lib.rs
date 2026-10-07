@@ -148,15 +148,14 @@ impl SqliteMemoryStore {
     }
 
     pub fn request_status(&self, id: &str) -> Result<Option<String>> {
-        let receipt: Option<Option<String>> = self
-            .conn()?
-            .query_row(
+        let receipt: Option<Option<String>> = self.with_conn(|conn| {
+            conn.query_row(
                 "SELECT response FROM request_receipts WHERE request_id=?1",
                 [id],
                 |row| row.get(0),
             )
             .optional()
-            .map_err(storage)?;
+        })?;
         Ok(receipt.map(|response| response.unwrap_or_default()))
     }
 
@@ -895,81 +894,85 @@ impl KnowledgeStore for SqliteMemoryStore {
         let max_hops = max_hops.min(4);
         let limit = limit.min(100);
         let conn = self.conn()?;
-        let mut frontier = seed_ids
-            .iter()
-            .filter(|id| !id.trim().is_empty())
-            .take(16)
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut visited = HashSet::new();
-        let mut concepts = Vec::new();
-        for _ in 0..=max_hops {
-            frontier.retain(|id| visited.insert(id.clone()));
-            if frontier.is_empty() || concepts.len() >= limit {
-                break;
-            }
-            let ph = (0..frontier.len())
-                .map(|i| format!("?{}", i + 3))
-                .collect::<Vec<_>>()
-                .join(",");
-            let mut values = vec![
-                rusqlite::types::Value::from(namespace.to_string()),
-                rusqlite::types::Value::from(workspace_id.to_string()),
-            ];
-            values.extend(frontier.iter().cloned().map(rusqlite::types::Value::from));
-            let sql = format!(
-                "SELECT id,namespace,workspace_id,name,definition,confidence,sensitivity,revision,labels_json,source_memory_ids_json,created_at,updated_at FROM concepts WHERE namespace=?1 AND workspace_id=?2 AND id IN ({ph})"
-            );
-            let mut stmt = conn.prepare(&sql).map_err(storage)?;
-            let loaded = stmt
-                .query_map(rusqlite::params_from_iter(values.iter()), map_concept)
-                .map_err(storage)?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(storage)?;
-            let mut by_id = loaded
-                .into_iter()
-                .map(|c| (c.id.clone(), c))
-                .collect::<HashMap<_, _>>();
-            for id in &frontier {
-                if let Some(c) = by_id.remove(id) {
-                    concepts.push(c);
-                    if concepts.len() >= limit {
-                        break;
+        let result = (|| {
+            let mut frontier = seed_ids
+                .iter()
+                .filter(|id| !id.trim().is_empty())
+                .take(16)
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut visited = HashSet::new();
+            let mut concepts = Vec::new();
+            for _ in 0..=max_hops {
+                frontier.retain(|id| visited.insert(id.clone()));
+                if frontier.is_empty() || concepts.len() >= limit {
+                    break;
+                }
+                let ph = (0..frontier.len())
+                    .map(|i| format!("?{}", i + 3))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let mut values = vec![
+                    rusqlite::types::Value::from(namespace.to_string()),
+                    rusqlite::types::Value::from(workspace_id.to_string()),
+                ];
+                values.extend(frontier.iter().cloned().map(rusqlite::types::Value::from));
+                let sql = format!(
+                    "SELECT id,namespace,workspace_id,name,definition,confidence,sensitivity,revision,labels_json,source_memory_ids_json,created_at,updated_at FROM concepts WHERE namespace=?1 AND workspace_id=?2 AND id IN ({ph})"
+                );
+                let mut stmt = conn.prepare(&sql).map_err(storage)?;
+                let loaded = stmt
+                    .query_map(rusqlite::params_from_iter(values.iter()), map_concept)
+                    .map_err(storage)?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(storage)?;
+                let mut by_id = loaded
+                    .into_iter()
+                    .map(|c| (c.id.clone(), c))
+                    .collect::<HashMap<_, _>>();
+                for id in &frontier {
+                    if let Some(c) = by_id.remove(id) {
+                        concepts.push(c);
+                        if concepts.len() >= limit {
+                            break;
+                        }
                     }
                 }
-            }
-            if concepts.len() >= limit {
-                break;
-            }
-            let mut ev = vec![
-                rusqlite::types::Value::from(namespace.to_string()),
-                rusqlite::types::Value::from(workspace_id.to_string()),
-            ];
-            ev.extend(frontier.iter().cloned().map(rusqlite::types::Value::from));
-            let esql = format!(
-                "SELECT source_id,target_id FROM concept_links WHERE namespace=?1 AND workspace_id=?2 AND (source_id IN ({ph}) OR target_id IN ({ph}))"
-            );
-            let mut estmt = conn.prepare(&esql).map_err(storage)?;
-            let edges = estmt
-                .query_map(rusqlite::params_from_iter(ev.iter()), |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })
-                .map_err(storage)?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(storage)?;
-            let current = frontier.iter().cloned().collect::<HashSet<_>>();
-            let mut next = BTreeSet::new();
-            for (source, target) in edges {
-                if current.contains(&source) && !visited.contains(&target) {
-                    next.insert(target.clone());
+                if concepts.len() >= limit {
+                    break;
                 }
-                if current.contains(&target) && !visited.contains(&source) {
-                    next.insert(source);
+                let mut ev = vec![
+                    rusqlite::types::Value::from(namespace.to_string()),
+                    rusqlite::types::Value::from(workspace_id.to_string()),
+                ];
+                ev.extend(frontier.iter().cloned().map(rusqlite::types::Value::from));
+                let esql = format!(
+                    "SELECT source_id,target_id FROM concept_links WHERE namespace=?1 AND workspace_id=?2 AND (source_id IN ({ph}) OR target_id IN ({ph}))"
+                );
+                let mut estmt = conn.prepare(&esql).map_err(storage)?;
+                let edges = estmt
+                    .query_map(rusqlite::params_from_iter(ev.iter()), |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .map_err(storage)?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(storage)?;
+                let current = frontier.iter().cloned().collect::<HashSet<_>>();
+                let mut next = BTreeSet::new();
+                for (source, target) in edges {
+                    if current.contains(&source) && !visited.contains(&target) {
+                        next.insert(target.clone());
+                    }
+                    if current.contains(&target) && !visited.contains(&source) {
+                        next.insert(source);
+                    }
                 }
+                frontier = next.into_iter().collect();
             }
-            frontier = next.into_iter().collect();
-        }
-        Ok(concepts)
+            Ok(concepts)
+        })();
+        self.return_conn(conn);
+        result
     }
 }
 
@@ -1421,6 +1424,36 @@ fn storage<E: std::fmt::Display>(error: E) -> MemoryError {
 mod tests {
     use super::*;
     use kitt_memory_core::{SemanticScore, normalize};
+
+    #[test]
+    fn receipt_and_concept_queries_preserve_reader_pool_on_success_and_error() {
+        let path = temp_db("reader-pool");
+        let store = SqliteMemoryStore::open(&path).unwrap();
+        let readers = store.readers.lock().unwrap().len();
+        for _ in 0..20 {
+            assert!(store.request_status("missing").unwrap().is_none());
+            assert!(
+                store
+                    .expand_concepts("assistant", "global", &["missing".into()], 1, 10)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert_eq!(store.readers.lock().unwrap().len(), readers);
+        store
+            .writer_conn()
+            .unwrap()
+            .execute("DROP TABLE concepts", [])
+            .unwrap();
+        assert!(
+            store
+                .expand_concepts("assistant", "global", &["missing".into()], 1, 10)
+                .is_err()
+        );
+        assert_eq!(store.readers.lock().unwrap().len(), readers);
+        drop(store);
+        cleanup(&path);
+    }
 
     fn memory(content: &str, sensitivity: Sensitivity, pinned: bool) -> NewMemory {
         NewMemory {

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.3 — 2026-10-07
+
+Request receipt lookup and concept graph expansion return SQLite readers to the pool on both success and error. Repeated queries no longer drain the pool and reopen connections. Storage schemas and wire framing are unchanged.
+
 ## 0.9.2 — 2026-10-06
 
 - Add bounded `receipt.record_batch` management (1–128 receipts), validated before a single SQLite transaction. Preserve monotonic/idempotent receipt updates and test all-or-nothing validation. SQLite schema remains v9.
