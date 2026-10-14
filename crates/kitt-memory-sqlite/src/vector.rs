@@ -58,7 +58,9 @@ fn dot(query: &[f32], raw: &[u8]) -> Option<f32> {
         return None;
     }
     let sum = raw
-        .as_chunks::<4>().0.iter()
+        .as_chunks::<4>()
+        .0
+        .iter()
         .zip(query.iter())
         .map(|(bytes, value)| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) * value)
         .sum::<f32>();
