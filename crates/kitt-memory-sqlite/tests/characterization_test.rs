@@ -743,7 +743,7 @@ fn migration_v8_to_v9_rehashes_without_data_loss_or_sensitivity_downgrade() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     assert_eq!(total, 2);
     assert_eq!(superseded, 1);
 
