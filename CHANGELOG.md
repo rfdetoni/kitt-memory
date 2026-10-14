@@ -1,3 +1,10 @@
+## 0.10.0
+
+- Schema v10: optional multi-probe LSH vector candidate index and bounded Rust cosine ranking.
+- Model/content-hash-bound derived embeddings, invalidation triggers, composite vector index.
+- Explicit vector upsert/clear commands and opt-in hybrid RRF on memory.search.
+- No new crates or network-facing model dependencies; FTS5 path unchanged.
+
 # Changelog
 
 ## 0.9.3 — 2026-10-07

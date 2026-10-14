@@ -37,3 +37,8 @@ SQLite schema 9 is forward-only; stop an older daemon before upgrading. The migr
 Protocol wire version remains 1. Existing `memory.search`, `memory.timeline` and `memory.get` response fields remain present. New fields and controls are additive: `include_provenance`, `exclude_ids`, `include_context_hints`, `context_hints`, `common`, `memory.baseline.request`, `baseline_revision` and `etag`. Context hints/common are emitted only when explicitly requested, so legacy strict response decoders keep the original v1 shape.
 
 Search and ordinary recall do not mutate access telemetry. Explicit hydration and receipts marked referenced/used-for-action are the reinforcement points. Baseline revisions intentionally ignore access-only updates.
+
+
+## v0.10.0 optional vector index
+
+Forward-only SQLite schema 10 adds `memory_embeddings`, a composite model/dimension/bucket probe index and invalidation triggers. Existing consumers need no changes unless they opt in to hybrid retrieval. No public KAP contract change; authenticated memory v1 envelopes accept `memory.manage` operations `vector.upsert` and `vector.clear`, plus optional `memory.search.query_embedding` and `embedding_model`. The embedding producer must use one stable model/dimension per query and reindex records when the model changes.

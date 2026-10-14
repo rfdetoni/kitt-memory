@@ -62,3 +62,16 @@ Sensibilidade é monotônica, escopos são isolados por namespace/workspace/conv
 A migração v9 recalcula normalização/hashes e deriva `gist` + `tokens_est`; colisões novas são consolidadas por supersessão, preservando a sensibilidade mais restritiva. O FTS quente indexa apenas o conteúdo normalizado.
 
 O daemon reutiliza um pool pequeno de readers, mantém um worker pool fixo para conexões e bufferiza `recall_traces`. A cada minuto executa manutenção limitada: flush de traces, prune de expirados e histórico antigo, `FTS optimize`, `PRAGMA optimize` e checkpoint WAL passivo.
+
+
+## Busca híbrida vetorial (schema 10)
+
+Sem serviço vetorial adicional. Embeddings produzidos pelo cliente são dados derivados normalizados (2 a 2048 dimensões, float32 finito), isolados por modelo e invalidados quando o conteúdo muda. Recuperação: FTS5 + LSH multi-probe + RRF. A busca é aproximada; avalie recall antes de corpus grande.
+
+Envie `memory.manage.request` autenticado:
+
+```json
+{"operation":"vector.upsert","arguments":{"memory_id":"<id existente>","model":"nomic-embed-text","embedding":[0.1,0.3,0.2]}}
+```
+
+Na consulta `memory.search.request`, passe `query`, `workspace_id`, `embedding_model` e `query_embedding` gerado pelo mesmo modelo. Sem vetor mantém FTS5. `vector.clear` com `{"model":"nomic-embed-text"}` remove embeddings para reconstrução. Não há download de modelos nem egress implícito. Upserts/limpeza usam auth e recibos de requisição. Escopo, sensibilidade e validade são filtrados no SQL, antes do ranking.
