@@ -18,9 +18,10 @@ pub(super) fn handle(store: &SqliteMemoryStore, payload: &Value) -> Result<Value
         "vector.upsert" => {
             let memory_id = as_str(&args, "memory_id")?;
             let model = as_str(&args, "model")?;
-            let embedding = super::embedding_from_value(args.get("embedding")
-                .ok_or("missing embedding")?)?;
-            let updated = store.upsert_embedding(memory_id, model, &embedding)
+            let embedding =
+                super::embedding_from_value(args.get("embedding").ok_or("missing embedding")?)?;
+            let updated = store
+                .upsert_embedding(memory_id, model, &embedding)
                 .map_err(|e| e.to_string())?;
             Ok(json!({"updated":updated}))
         }

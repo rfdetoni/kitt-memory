@@ -332,13 +332,16 @@ fn embedding_from_value(value: &Value) -> Result<Vec<f32>, String> {
     if !(2..=2048).contains(&values.len()) {
         return Err("embedding must have 2..2048 dimensions".into());
     }
-    values.iter().map(|entry| {
-        let f = entry.as_f64().ok_or("embedding entries must be numbers")?;
-        if !f.is_finite() || f.abs() > f32::MAX as f64 {
-            return Err("embedding entries must be finite f32".into());
-        }
-        Ok(f as f32)
-    }).collect()
+    values
+        .iter()
+        .map(|entry| {
+            let f = entry.as_f64().ok_or("embedding entries must be numbers")?;
+            if !f.is_finite() || f.abs() > f32::MAX as f64 {
+                return Err("embedding entries must be finite f32".into());
+            }
+            Ok(f as f32)
+        })
+        .collect()
 }
 
 fn progressive_search(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
@@ -430,18 +433,20 @@ fn progressive_search(store: &SqliteMemoryStore, payload: &Value) -> Result<Valu
         allow_private,
         allow_secret,
     };
-    let embedding = payload.get("query_embedding")
-        .map(embedding_from_value).transpose()?;
+    let embedding = payload
+        .get("query_embedding")
+        .map(embedding_from_value)
+        .transpose()?;
     let records = if let Some(vector) = embedding.as_deref() {
         store.search_hybrid(&query, as_str(payload, "embedding_model")?, vector)
     } else {
         store.recall(&query)
     }
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .filter(|record| !excluded.contains(&record.id))
-        .take(max_results)
-        .collect::<Vec<_>>();
+    .map_err(|error| error.to_string())?
+    .into_iter()
+    .filter(|record| !excluded.contains(&record.id))
+    .take(max_results)
+    .collect::<Vec<_>>();
     let candidates = records.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
     let provenance = provenance_for_many(store, &candidates, include_provenance)?;
 

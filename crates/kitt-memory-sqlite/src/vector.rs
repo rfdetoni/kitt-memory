@@ -7,12 +7,16 @@ const MIN_DIMS: usize = 2;
 const VECTOR_SCAN_CAP: i64 = 4096;
 
 fn normalized(values: &[f32]) -> Result<Vec<f32>> {
-    if !(MIN_DIMS..=MAX_DIMS).contains(&values.len())
-        || values.iter().any(|v| !v.is_finite())
-    {
-        return Err(MemoryError::Invalid("embedding must contain 2..2048 finite floats".into()));
+    if !(MIN_DIMS..=MAX_DIMS).contains(&values.len()) || values.iter().any(|v| !v.is_finite()) {
+        return Err(MemoryError::Invalid(
+            "embedding must contain 2..2048 finite floats".into(),
+        ));
     }
-    let length = values.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>().sqrt();
+    let length = values
+        .iter()
+        .map(|v| (*v as f64) * (*v as f64))
+        .sum::<f64>()
+        .sqrt();
     if length <= 1e-12 || !length.is_finite() {
         return Err(MemoryError::Invalid("zero/invalid embedding norm".into()));
     }
@@ -26,8 +30,7 @@ fn bucket(values: &[f32]) -> i64 {
     for bit in 0..8 {
         let mut sum = 0_f64;
         for (dimension, value) in values.iter().enumerate() {
-            let mut x = (dimension as u64 + 1)
-                .wrapping_mul(0x9e3779b97f4a7c15)
+            let mut x = (dimension as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15)
                 ^ ((bit as u64 + 1).wrapping_mul(0xbf58476d1ce4e5b9));
             x ^= x >> 30;
             x = x.wrapping_mul(0xbf58476d1ce4e5b9);
@@ -44,31 +47,45 @@ fn bucket(values: &[f32]) -> i64 {
 }
 
 fn vector_blob(values: &[f32]) -> Vec<u8> {
-    values.iter().flat_map(|value| value.to_le_bytes()).collect()
+    values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
 }
 
 fn dot(query: &[f32], raw: &[u8]) -> Option<f32> {
     if raw.len() != query.len() * 4 {
         return None;
     }
-    let sum = raw.chunks_exact(4).zip(query.iter()).map(|(bytes, value)| {
-        f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) * value
-    }).sum::<f32>();
+    let sum = raw
+        .chunks_exact(4)
+        .zip(query.iter())
+        .map(|(bytes, value)| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) * value)
+        .sum::<f32>();
     sum.is_finite().then_some(sum.clamp(-1.0, 1.0))
 }
 
 impl SqliteMemoryStore {
     /// Upsert a precomputed embedding only if its memory is currently active.
     /// Both embedding/model and memory content hash must agree at query time.
-    pub fn upsert_embedding(&self, memory_id: &str, model: &str, embedding: &[f32]) -> Result<bool> {
-        if model.is_empty() || model.len() > 128 || !model.is_ascii()
+    pub fn upsert_embedding(
+        &self,
+        memory_id: &str,
+        model: &str,
+        embedding: &[f32],
+    ) -> Result<bool> {
+        if model.is_empty()
+            || model.len() > 128
+            || !model.is_ascii()
             || model.bytes().any(|byte| byte.is_ascii_control())
         {
             return Err(MemoryError::Invalid("invalid embedding model".into()));
         }
         let embedding = normalized(embedding)?;
         let mut conn = self.writer_conn()?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage)?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
         let inserted = tx.execute(
             "INSERT INTO memory_embeddings(memory_id,model,dimensions,content_hash,bucket,vector,updated_at)
              SELECT m.id,?2,?3,m.content_hash,?4,?5,unixepoch()
@@ -93,13 +110,24 @@ impl SqliteMemoryStore {
     }
 
     fn vector_candidates(
-        &self, query: &RecallQuery, model: &str, embedding: &[f32], limit: usize,
+        &self,
+        query: &RecallQuery,
+        model: &str,
+        embedding: &[f32],
+        limit: usize,
     ) -> Result<Vec<(MemoryRecord, f32)>> {
         let embedding = normalized(embedding)?;
         let center = bucket(&embedding);
         let buckets = [
-            center, center ^ 1, center ^ 2, center ^ 4, center ^ 8,
-            center ^ 16, center ^ 32, center ^ 64, center ^ 128,
+            center,
+            center ^ 1,
+            center ^ 2,
+            center ^ 4,
+            center ^ 8,
+            center ^ 16,
+            center ^ 32,
+            center ^ 64,
+            center ^ 128,
         ];
         let at = query.as_of.unwrap_or_else(now_epoch);
         let scope_key = query.scope_key.as_deref().unwrap_or("");
@@ -121,13 +149,29 @@ impl SqliteMemoryStore {
                  LIMIT ?18"
             );
             let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map(params![
-                model, embedding.len() as i64,
-                buckets[0], buckets[1], buckets[2], buckets[3], buckets[4],
-                buckets[5], buckets[6], buckets[7], buckets[8],
-                query.namespace, query.workspace_id, scope_key, at,
-                query.allow_private as i64, query.allow_secret as i64, VECTOR_SCAN_CAP,
-            ], |row| Ok((map_memory_row(row)?, row.get::<_, Vec<u8>>(24)?)))?;
+            let rows = stmt.query_map(
+                params![
+                    model,
+                    embedding.len() as i64,
+                    buckets[0],
+                    buckets[1],
+                    buckets[2],
+                    buckets[3],
+                    buckets[4],
+                    buckets[5],
+                    buckets[6],
+                    buckets[7],
+                    buckets[8],
+                    query.namespace,
+                    query.workspace_id,
+                    scope_key,
+                    at,
+                    query.allow_private as i64,
+                    query.allow_secret as i64,
+                    VECTOR_SCAN_CAP,
+                ],
+                |row| Ok((map_memory_row(row)?, row.get::<_, Vec<u8>>(24)?)),
+            )?;
             rows.collect::<std::result::Result<Vec<_>, _>>()
         })?;
         let mut hits = Vec::new();
@@ -147,7 +191,10 @@ impl SqliteMemoryStore {
     /// Hybrid lexical+vector reciprocal-rank fusion (RRF), deduplicated by memory ID.
     /// No query vector means the existing lexical/retention search is unchanged.
     pub fn search_hybrid(
-        &self, query: &RecallQuery, model: &str, embedding: &[f32],
+        &self,
+        query: &RecallQuery,
+        model: &str,
+        embedding: &[f32],
     ) -> Result<Vec<MemoryRecord>> {
         if embedding.is_empty() || query.text.trim().is_empty() || query.limit == 0 {
             return self.recall(query);
@@ -168,12 +215,17 @@ impl SqliteMemoryStore {
         }
         for (index, (record, _score)) in semantic.into_iter().enumerate() {
             let score = 1.2 / (60.0 + index as f32 + 1.0);
-            ranks.entry(record.id.clone())
+            ranks
+                .entry(record.id.clone())
                 .and_modify(|existing| existing.0 += score)
                 .or_insert((score, record));
         }
         let mut ranked = ranks.into_values().collect::<Vec<_>>();
-        ranked.sort_by(|a,b| b.0.total_cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
-        Ok(ranked.into_iter().take(limit).map(|(_,record)| record).collect())
+        ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
+        Ok(ranked
+            .into_iter()
+            .take(limit)
+            .map(|(_, record)| record)
+            .collect())
     }
 }

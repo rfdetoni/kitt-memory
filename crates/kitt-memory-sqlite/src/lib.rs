@@ -1414,7 +1414,7 @@ fn migrate(conn: &mut Connection) -> std::result::Result<(), rusqlite::Error> {
                 AFTER UPDATE OF content_hash ON memories
                 WHEN old.content_hash<>new.content_hash BEGIN
                 DELETE FROM memory_embeddings WHERE memory_id=old.id;
-            END;"
+            END;",
         )?;
     }
     if current < STORE_SCHEMA_VERSION {
