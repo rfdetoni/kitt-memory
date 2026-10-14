@@ -327,6 +327,20 @@ fn progressive_trace(
     Ok(trace_id)
 }
 
+fn embedding_from_value(value: &Value) -> Result<Vec<f32>, String> {
+    let values = value.as_array().ok_or("embedding must be an array")?;
+    if !(2..=2048).contains(&values.len()) {
+        return Err("embedding must have 2..2048 dimensions".into());
+    }
+    values.iter().map(|entry| {
+        let f = entry.as_f64().ok_or("embedding entries must be numbers")?;
+        if !f.is_finite() || f.abs() > f32::MAX as f64 {
+            return Err("embedding entries must be finite f32".into());
+        }
+        Ok(f as f32)
+    }).collect()
+}
+
 fn progressive_search(store: &SqliteMemoryStore, payload: &Value) -> Result<Value, String> {
     let started = Instant::now();
     let namespace = payload
@@ -416,8 +430,13 @@ fn progressive_search(store: &SqliteMemoryStore, payload: &Value) -> Result<Valu
         allow_private,
         allow_secret,
     };
-    let records = store
-        .recall(&query)
+    let embedding = payload.get("query_embedding")
+        .map(embedding_from_value).transpose()?;
+    let records = if let Some(vector) = embedding.as_deref() {
+        store.search_hybrid(&query, as_str(payload, "embedding_model")?, vector)
+    } else {
+        store.recall(&query)
+    }
         .map_err(|error| error.to_string())?
         .into_iter()
         .filter(|record| !excluded.contains(&record.id))
@@ -510,7 +529,7 @@ fn progressive_search(store: &SqliteMemoryStore, payload: &Value) -> Result<Valu
                 "include_provenance": include_provenance,
                 "include_context_hints": include_context_hints,
                 "excluded_count": excluded.len(),
-                "mode": "search"
+                "mode": if embedding.is_some() { "hybrid" } else { "search" }
             }),
             candidates: &candidates,
             selected: &selected,

@@ -23,10 +23,11 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 mod admin;
 mod evidence;
 mod semantic;
+mod vector;
 
 pub use semantic::TimelineMemoryQuery;
 
-const STORE_SCHEMA_VERSION: i64 = 9;
+const STORE_SCHEMA_VERSION: i64 = 10;
 const MEMORY_COLUMNS: &str = "m.id,m.namespace,m.workspace_id,m.kind,m.content,m.normalized_content,m.status,m.sensitivity,m.scope,m.scope_key,m.importance,m.confidence,m.created_at,m.updated_at,m.last_accessed_at,m.access_count,m.valid_from,m.valid_until,m.supersedes_id,m.content_hash,m.pinned,m.metadata_json,m.gist,m.tokens_est";
 
 fn ensure_private_database_file(path: &Path) -> Result<()> {
@@ -1391,6 +1392,29 @@ fn migrate(conn: &mut Connection) -> std::result::Result<(), rusqlite::Error> {
                VALUES(old.namespace,old.workspace_id,COALESCE(old.scope_key,''),1,unixepoch())
                ON CONFLICT(namespace,workspace_id,scope_key) DO UPDATE SET revision=revision+1,updated_at=unixepoch();
              END;"
+        )?;
+    }
+    if current < 10 {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS memory_embeddings(
+                memory_id TEXT NOT NULL,model TEXT NOT NULL,
+                dimensions INTEGER NOT NULL CHECK(dimensions BETWEEN 2 AND 2048),
+                content_hash TEXT NOT NULL,
+                bucket INTEGER NOT NULL CHECK(bucket BETWEEN 0 AND 255),
+                vector BLOB NOT NULL,updated_at INTEGER NOT NULL,
+                PRIMARY KEY(memory_id,model),
+                FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_memory_embeddings_probe
+                ON memory_embeddings(model,dimensions,bucket,memory_id);
+            CREATE TRIGGER IF NOT EXISTS memory_embeddings_delete AFTER DELETE ON memories BEGIN
+                DELETE FROM memory_embeddings WHERE memory_id=old.id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS memory_embeddings_stale
+                AFTER UPDATE OF content_hash ON memories
+                WHEN old.content_hash<>new.content_hash BEGIN
+                DELETE FROM memory_embeddings WHERE memory_id=old.id;
+            END;"
         )?;
     }
     if current < STORE_SCHEMA_VERSION {
