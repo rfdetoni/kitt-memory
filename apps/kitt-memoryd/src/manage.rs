@@ -20,8 +20,9 @@ pub(super) fn handle(store: &SqliteMemoryStore, payload: &Value) -> Result<Value
             let model = as_str(&args, "model")?;
             let embedding =
                 super::embedding_from_value(args.get("embedding").ok_or("missing embedding")?)?;
+            let expected_hash = as_str(&args, "expected_content_hash")?;
             let updated = store
-                .upsert_embedding(memory_id, model, &embedding)
+                .upsert_embedding(memory_id, model, &embedding, expected_hash)
                 .map_err(|e| e.to_string())?;
             Ok(json!({"updated":updated}))
         }

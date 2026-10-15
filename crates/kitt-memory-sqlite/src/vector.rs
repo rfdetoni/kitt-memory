@@ -75,6 +75,7 @@ impl SqliteMemoryStore {
         memory_id: &str,
         model: &str,
         embedding: &[f32],
+        expected_content_hash: &str,
     ) -> Result<bool> {
         if model.is_empty()
             || model.len() > 128
@@ -82,6 +83,9 @@ impl SqliteMemoryStore {
             || model.bytes().any(|byte| byte.is_ascii_control())
         {
             return Err(MemoryError::Invalid("invalid embedding model".into()));
+        }
+        if expected_content_hash.len() != 64 || !expected_content_hash.bytes().all(|c| c.is_ascii_hexdigit()) {
+            return Err(MemoryError::Invalid("expected_content_hash must be a SHA-256 hex digest".into()));
         }
         let embedding = normalized(embedding)?;
         let mut conn = self.writer_conn()?;
@@ -91,11 +95,11 @@ impl SqliteMemoryStore {
         let inserted = tx.execute(
             "INSERT INTO memory_embeddings(memory_id,model,dimensions,content_hash,bucket,vector,updated_at)
              SELECT m.id,?2,?3,m.content_hash,?4,?5,unixepoch()
-             FROM memories m WHERE m.id=?1 AND m.status='ACTIVE' AND m.sensitivity<>'ephemeral'
+             FROM memories m WHERE m.id=?1 AND m.content_hash=?6 AND m.status='ACTIVE' AND m.sensitivity<>'ephemeral'
              ON CONFLICT(memory_id,model) DO UPDATE SET
                dimensions=excluded.dimensions,content_hash=excluded.content_hash,
                bucket=excluded.bucket,vector=excluded.vector,updated_at=excluded.updated_at",
-            params![memory_id, model, embedding.len() as i64, bucket(&embedding), vector_blob(&embedding)],
+            params![memory_id, model, embedding.len() as i64, bucket(&embedding), vector_blob(&embedding), expected_content_hash],
         ).map_err(storage)?;
         tx.commit().map_err(storage)?;
         Ok(inserted > 0)

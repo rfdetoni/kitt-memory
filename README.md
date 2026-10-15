@@ -1,3 +1,7 @@
+## Memory 0.10.1 — content-hash guarded embeddings
+
+Authenticated `vector.upsert` now requires `expected_content_hash` from the `memory.remember.response.record`. The SQLite INSERT validates this hash atomically against the current active memory, refusing stale asynchronous embeddings instead of tagging an old vector with a new revision. No schema change; CLI and other callers must supply the new field. See [release notes](docs/RELEASE_0.10.1.md).
+
 ## KITT Memory 0.10.0 — optional indexed hybrid retrieval
 
 SQLite schema **v10** adds a bounded, model-scoped vector index using normalized float32 embeddings and an 8-bit multi-probe locality-sensitive hash (LSH). It is built directly into the existing Rust/SQLite adapter, so **there is no new runtime dependency or separate database server**. FTS5 remains authoritative for lexical matches, and vector-only matches are fused with lexical results by reciprocal-rank fusion (RRF). This is approximate retrieval, not LanceDB/HNSW; measure Recall@K before promoting it for large corpora.
