@@ -188,7 +188,7 @@ fn lexical_results_are_preserved_without_an_embedding() {
 
 #[test]
 fn stale_embedding_is_never_written_after_memory_content_changes() {
-    let store = SqliteMemoryStore::open(&store_path()).unwrap();
+    let store = SqliteMemoryStore::open(store_path()).unwrap();
     let id = put(
         &store,
         "ws",
@@ -221,7 +221,7 @@ fn stale_embedding_is_never_written_after_memory_content_changes() {
 
 #[test]
 fn backfill_retries_missing_vectors_and_never_crosses_workspace_scope() {
-    let store = SqliteMemoryStore::open(&store_path()).unwrap();
+    let store = SqliteMemoryStore::open(store_path()).unwrap();
     let id = put(&store, "ws", Sensitivity::Public, "backfill candidate");
     let _other = put(
         &store,
