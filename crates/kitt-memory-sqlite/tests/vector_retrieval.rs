@@ -1,6 +1,11 @@
-use kitt_memory_core::{hash_normalized, normalize, MemoryKind, MemoryScope, MemoryStore, NewMemory, RecallQuery, Sensitivity};
+use kitt_memory_core::{
+    MemoryKind, MemoryScope, MemoryStore, NewMemory, RecallQuery, Sensitivity, hash_normalized,
+    normalize,
+};
 
-fn hash(content: &str) -> String { hash_normalized(&normalize(content)) }
+fn hash(content: &str) -> String {
+    hash_normalized(&normalize(content))
+}
 use kitt_memory_sqlite::SqliteMemoryStore;
 
 fn store_path() -> std::path::PathBuf {
@@ -63,8 +68,16 @@ fn hybrid_recovers_vector_only_match_with_scope_and_privacy_filters() {
         Sensitivity::Secret,
         "secret unrelated memory",
     );
-    for (id, content) in [(&visible, "pluggable retry plan scheduler"), (&other_ws, "another project"), (&secret, "secret unrelated memory")] {
-        assert!(store.upsert_embedding(id, "test-v1", &[1.0, 0.0, 0.0], &hash(content)).unwrap());
+    for (id, content) in [
+        (&visible, "pluggable retry plan scheduler"),
+        (&other_ws, "another project"),
+        (&secret, "secret unrelated memory"),
+    ] {
+        assert!(
+            store
+                .upsert_embedding(id, "test-v1", &[1.0, 0.0, 0.0], &hash(content))
+                .unwrap()
+        );
     }
     let result = store
         .search_hybrid(&query("ws1"), "test-v1", &[1.0, 0.0, 0.0])
@@ -92,16 +105,57 @@ fn rejects_bad_vectors_and_cleans_up_deleted_memories() {
         Sensitivity::Public,
         "correctable application state",
     );
-    assert!(store.upsert_embedding(&id, "m1", &[f32::NAN, 0.0] , &hash("correctable application state")).is_err());
-    assert!(store.upsert_embedding(&id, "m1", &[0.0, 0.0], &hash("correctable application state")).is_err());
-    assert!(store.upsert_embedding(&id, "m1", &[0.0, 1.0], &hash("correctable application state")).unwrap());
+    assert!(
+        store
+            .upsert_embedding(
+                &id,
+                "m1",
+                &[f32::NAN, 0.0],
+                &hash("correctable application state")
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .upsert_embedding(
+                &id,
+                "m1",
+                &[0.0, 0.0],
+                &hash("correctable application state")
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .upsert_embedding(
+                &id,
+                "m1",
+                &[0.0, 1.0],
+                &hash("correctable application state")
+            )
+            .unwrap()
+    );
     assert!(
         !store
-            .upsert_embedding("missing", "m1", &[0.0, 1.0])
+            .upsert_embedding(
+                "missing",
+                "m1",
+                &[0.0, 1.0],
+                &hash("correctable application state"),
+            )
             .unwrap()
     );
     assert_eq!(store.clear_embeddings("m1").unwrap(), 1);
-    assert!(store.upsert_embedding(&id, "m1", &[0.0, 1.0], &hash("correctable application state")).unwrap());
+    assert!(
+        store
+            .upsert_embedding(
+                &id,
+                "m1",
+                &[0.0, 1.0],
+                &hash("correctable application state")
+            )
+            .unwrap()
+    );
     assert!(store.forget(&id).unwrap());
     assert!(
         store
@@ -135,8 +189,32 @@ fn lexical_results_are_preserved_without_an_embedding() {
 #[test]
 fn stale_embedding_is_never_written_after_memory_content_changes() {
     let store = SqliteMemoryStore::open(&store_path()).unwrap();
-    let id = put(&store, "ws", Sensitivity::Public, "newer revision of the memory");
-    assert!(!store.upsert_embedding(&id, "model", &[1.0, 0.0], &hash("outdated version")).unwrap());
-    assert!(store.upsert_embedding(&id, "model", &[1.0, 0.0], &hash("newer revision of the memory")).unwrap());
-    assert!(store.search_hybrid(&query("ws"), "model", &[1.0, 0.0]).unwrap().iter().any(|r| r.id == id));
+    let id = put(
+        &store,
+        "ws",
+        Sensitivity::Public,
+        "newer revision of the memory",
+    );
+    assert!(
+        !store
+            .upsert_embedding(&id, "model", &[1.0, 0.0], &hash("outdated version"))
+            .unwrap()
+    );
+    assert!(
+        store
+            .upsert_embedding(
+                &id,
+                "model",
+                &[1.0, 0.0],
+                &hash("newer revision of the memory")
+            )
+            .unwrap()
+    );
+    assert!(
+        store
+            .search_hybrid(&query("ws"), "model", &[1.0, 0.0])
+            .unwrap()
+            .iter()
+            .any(|r| r.id == id)
+    );
 }

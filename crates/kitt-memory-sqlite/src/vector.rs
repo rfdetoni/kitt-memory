@@ -84,8 +84,12 @@ impl SqliteMemoryStore {
         {
             return Err(MemoryError::Invalid("invalid embedding model".into()));
         }
-        if expected_content_hash.len() != 64 || !expected_content_hash.bytes().all(|c| c.is_ascii_hexdigit()) {
-            return Err(MemoryError::Invalid("expected_content_hash must be a SHA-256 hex digest".into()));
+        if expected_content_hash.len() != 64
+            || !expected_content_hash.bytes().all(|c| c.is_ascii_hexdigit())
+        {
+            return Err(MemoryError::Invalid(
+                "expected_content_hash must be a SHA-256 hex digest".into(),
+            ));
         }
         let embedding = normalized(embedding)?;
         let mut conn = self.writer_conn()?;
