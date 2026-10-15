@@ -26,6 +26,18 @@ pub(super) fn handle(store: &SqliteMemoryStore, payload: &Value) -> Result<Value
                 .map_err(|e| e.to_string())?;
             Ok(json!({"updated":updated}))
         }
+        "vector.pending" => {
+            let namespace = as_str(&args, "namespace")?;
+            let workspace_id = as_str(&args, "workspace_id")?;
+            let model = as_str(&args, "model")?;
+            let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(4) as usize;
+            let pending = store
+                .pending_embeddings(namespace, workspace_id, model, limit)
+                .map_err(|e| e.to_string())?;
+            Ok(json!({"pending":pending.into_iter().map(|(id,content,content_hash)| {
+                json!({"id":id,"content":content,"content_hash":content_hash})
+            }).collect::<Vec<_>>()}))
+        }
         "vector.clear" => {
             let model = as_str(&args, "model")?;
             let deleted = store.clear_embeddings(model).map_err(|e| e.to_string())?;

@@ -218,3 +218,18 @@ fn stale_embedding_is_never_written_after_memory_content_changes() {
             .any(|r| r.id == id)
     );
 }
+
+#[test]
+fn backfill_retries_missing_vectors_and_never_crosses_workspace_scope() {
+    let store = SqliteMemoryStore::open(&store_path()).unwrap();
+    let id = put(&store, "ws", Sensitivity::Public, "backfill candidate");
+    let _other = put(&store, "another-ws", Sensitivity::Public, "another workspace");
+    let _secret = put(&store, "ws", Sensitivity::Secret, "secret should not be embedded");
+    let pending = store.pending_embeddings("agent-cli", "ws", "model", 4).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].0, id);
+    assert_eq!(pending[0].2, hash("backfill candidate"));
+    assert!(store.upsert_embedding(&id, "model", &[1.0, 0.0], &pending[0].2).unwrap());
+    assert!(store.pending_embeddings("agent-cli", "ws", "model", 4).unwrap().is_empty());
+    assert_eq!(store.pending_embeddings("agent-cli", "ws", "other-model", 4).unwrap().len(), 1);
+}

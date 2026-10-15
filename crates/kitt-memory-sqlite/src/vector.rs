@@ -109,6 +109,46 @@ impl SqliteMemoryStore {
         Ok(inserted > 0)
     }
 
+    /// Return a bounded, workspace-scoped batch of missing derived embeddings.
+    /// Missing jobs survive process termination because the durable memories table
+    /// is the work source; completed revisions are excluded by content hash.
+    pub fn pending_embeddings(
+        &self,
+        namespace: &str,
+        workspace_id: &str,
+        model: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String, String)>> {
+        if namespace.is_empty()
+            || workspace_id.is_empty()
+            || model.is_empty()
+            || model.len() > 128
+            || !model.is_ascii()
+            || model.bytes().any(|byte| byte.is_ascii_control())
+        {
+            return Err(MemoryError::Invalid("invalid vector backfill request".into()));
+        }
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT m.id,m.content,m.content_hash FROM memories m
+                 WHERE m.namespace=?1 AND m.workspace_id=?2
+                   AND m.scope='workspace' AND m.status='ACTIVE'
+                   AND m.sensitivity NOT IN ('secret','ephemeral')
+                   AND NOT EXISTS (
+                     SELECT 1 FROM memory_embeddings v
+                     WHERE v.memory_id=m.id AND v.model=?3 AND v.content_hash=m.content_hash
+                   )
+                 ORDER BY m.updated_at DESC, m.id
+                 LIMIT ?4",
+            )?;
+            let rows = stmt.query_map(
+                params![namespace, workspace_id, model, limit.clamp(1, 16) as i64],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+        })
+    }
+
     /// Remove all derived vectors for a model, so its index can be regenerated.
     pub fn clear_embeddings(&self, model: &str) -> Result<usize> {
         if model.is_empty() || model.len() > 128 {

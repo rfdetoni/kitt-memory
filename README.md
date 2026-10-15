@@ -1,3 +1,7 @@
+## Memory 0.10.2 — durable bounded backfill source
+
+`memory.manage vector.pending` returns at most 16 missing, active workspace-scoped memories for a requested namespace and embedding model. Entries with current embeddings disappear automatically; incomplete tasks remain discoverable after crashes and model outages. Conversation, secret and ephemeral memories are excluded from automatic backfill. SHA-256 revision checks still guard every vector upsert. See [release notes](docs/RELEASE_0.10.2.md).
+
 ## Memory 0.10.1 — content-hash guarded embeddings
 
 Authenticated `vector.upsert` now requires `expected_content_hash` from the `memory.remember.response.record`. The SQLite INSERT validates this hash atomically against the current active memory, refusing stale asynchronous embeddings instead of tagging an old vector with a new revision. No schema change; CLI and other callers must supply the new field. See [release notes](docs/RELEASE_0.10.1.md).
