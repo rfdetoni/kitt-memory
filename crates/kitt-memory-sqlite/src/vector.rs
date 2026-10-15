@@ -126,7 +126,9 @@ impl SqliteMemoryStore {
             || !model.is_ascii()
             || model.bytes().any(|byte| byte.is_ascii_control())
         {
-            return Err(MemoryError::Invalid("invalid vector backfill request".into()));
+            return Err(MemoryError::Invalid(
+                "invalid vector backfill request".into(),
+            ));
         }
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(

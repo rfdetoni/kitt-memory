@@ -34,9 +34,11 @@ pub(super) fn handle(store: &SqliteMemoryStore, payload: &Value) -> Result<Value
             let pending = store
                 .pending_embeddings(namespace, workspace_id, model, limit)
                 .map_err(|e| e.to_string())?;
-            Ok(json!({"pending":pending.into_iter().map(|(id,content,content_hash)| {
+            Ok(
+                json!({"pending":pending.into_iter().map(|(id,content,content_hash)| {
                 json!({"id":id,"content":content,"content_hash":content_hash})
-            }).collect::<Vec<_>>()}))
+            }).collect::<Vec<_>>()}),
+            )
         }
         "vector.clear" => {
             let model = as_str(&args, "model")?;
