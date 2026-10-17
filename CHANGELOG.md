@@ -1,3 +1,93 @@
+# Changelog — K.I.T.T. Memory
+
+## Histórico migrado do README
+
+## Memory 0.10.2 — durable bounded backfill source
+
+`memory.manage vector.pending` returns at most 16 missing, active workspace-scoped memories for a requested namespace and embedding model. Entries with current embeddings disappear automatically; incomplete tasks remain discoverable after crashes and model outages. Conversation, secret and ephemeral memories are excluded from automatic backfill. SHA-256 revision checks still guard every vector upsert. See [release notes](docs/RELEASE_0.10.2.md).
+
+## Memory 0.10.1 — content-hash guarded embeddings
+
+Authenticated `vector.upsert` now requires `expected_content_hash` from the `memory.remember.response.record`. The SQLite INSERT validates this hash atomically against the current active memory, refusing stale asynchronous embeddings instead of tagging an old vector with a new revision. No schema change; CLI and other callers must supply the new field. See [release notes](docs/RELEASE_0.10.1.md).
+
+## KITT Memory 0.10.0 — optional indexed hybrid retrieval
+
+SQLite schema **v10** adds a bounded, model-scoped vector index using normalized float32 embeddings and an 8-bit multi-probe locality-sensitive hash (LSH). It is built directly into the existing Rust/SQLite adapter, so **there is no new runtime dependency or separate database server**. FTS5 remains authoritative for lexical matches, and vector-only matches are fused with lexical results by reciprocal-rank fusion (RRF). This is approximate retrieval, not LanceDB/HNSW; measure Recall@K before promoting it for large corpora.
+
+New authenticated `memory.manage` operations `vector.upsert` and `vector.clear` accept precomputed embeddings. `memory.search` accepts optional `embedding_model` plus `query_embedding` to enable hybrid retrieval. Calls without these fields retain lexical behavior. Vectors are content-hash-bound, scope-filtered, sensitivity-filtered and invalidated after memory content changes/deletion.
+
+See [v0.10.0 design and validation](docs/RELEASE_0.10.0.md).
+
+## Release 0.9.3 — Reader pool reuse
+
+Request receipt lookup and concept graph expansion return SQLite readers to the pool on both success and error. Repeated queries no longer drain the pool and reopen connections. Storage schemas and wire framing are unchanged.
+
+See [release notes](docs/RELEASE_0.9.3.md).
+
+## Release 0.9.2 — execution boundary hardening
+
+Add bounded `receipt.record_batch` management (1–128 receipts), validated before a single SQLite transaction. Preserve monotonic/idempotent receipt updates and test all-or-nothing validation. SQLite schema remains v9.
+
+See [release notes](docs/RELEASE_0.9.2.md).
+
+<p align="center">
+  <strong>Persistent local memory engine for the K.I.T.T. ecosystem.</strong><br>
+  Rust · SQLite WAL/FTS5 · scope-isolated hybrid retrieval · deterministic baselines · privacy-aware egress
+</p>
+
+<p align="center">
+  <a href="https://github.com/rfdetoni/kitt-memory/blob/main/LICENSE"><img alt="License MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <img alt="Rust" src="https://img.shields.io/badge/Rust-native-000000?logo=rust&logoColor=white">
+  <img alt="SQLite WAL" src="https://img.shields.io/badge/SQLite-WAL-003B57?logo=sqlite&logoColor=white">
+</p>
+
+K.I.T.T. Memory is the shared persistent memory data plane used across the ecosystem. It stores structured memories locally, retrieves them through bounded FTS5 + retention-aware ranking with an optional semantic reranker, builds deterministic prompt baselines, keeps semantic consolidation conservative, and preserves privacy sensitivity monotonically across updates and migrations.
+
+---
+
+## Memory 0.9.0 — deterministic low-latency retrieval
+
+Memory 0.9.0 optimizes the read plane without changing protocol wire version 1 or weakening scope/privacy guarantees. Search is now side-effect free: merely ranking or presenting a candidate no longer increments access telemetry. Explicit hydration and positive consumption evidence remain the reinforcement points.
+
+The SQLite schema advances to v9 with precomputed compact gists/token estimates, a normalized-content-only FTS5 index, reader connection reuse, bounded recall-trace buffering and periodic cleanup/optimization. Candidate fallback is bounded and relevance-gated instead of injecting high-salience rows into every query.
+
+Baselines are deterministic with respect to stored semantic state and expose optional `baseline_revision` + `etag`. `memory.baseline.request` accepts `if_none_match`; an unchanged baseline returns `not_modified=true` without retransmitting entries. Access-only telemetry does not advance the revision.
+
+Progressive retrieval keeps the existing v1 response fields for compatibility and adds optional request controls:
+- `include_provenance` to avoid provenance hydration when it is not needed;
+- `exclude_ids` on search for session-level duplicate suppression;
+- `include_context_hints` to opt into `context_hints` / `common` navigation metadata without changing the default v1 response shape.
+
+The daemon now uses a fixed worker pool, bounded connection queue, keep-alive request loops and constant-time token comparison. Recall traces are buffered off the search hot path and flushed in short batches.
+
+## Memory 0.7.0 — progressive retrieval with memory-owned budgets
+
+Memory 0.7.0 makes progressive retrieval the normal Agent-facing path. `memory.search` returns ranked snippets and provenance under a caller-provided token budget, `memory.get` hydrates only explicitly selected IDs under a second budget, and `memory.timeline` exposes bounded temporal/source-scoped history. The daemon remains responsible for enforcing scope, sensitivity and token pressure; consumers no longer depend on a fixed `limit=8` as the primary context-size control.
+
+The older `memory.recall` endpoint remains a transitional/internal primitive for compatibility during coordinated upgrades, but current ecosystem consumers should use search → get and record consumption receipts against the returned trace IDs.
+
+---
+
+## Memory 0.6.1 — public lifecycle evidence
+
+Memory 0.6.1 exposes a neutral lifecycle ingress for external K.I.T.T. clients: `session.started`, `turn.started`, `tool.completed`, `turn.completed` and `session.ended`. These hooks do not write semantic memories directly. They enqueue the same durable, idempotent `MemoryJob` pipeline used by internal memory work, after validating the event class and reducing source identity/revision to anonymized hashes.
+
+Lifecycle callers provide only a SHA-256 digest of their evidence. Raw tool arguments, prompts, credentials and recalled-memory bodies are not persisted through this interface, and `memory`/`recall` sources are rejected to prevent recalled context from being learned again as fresh evidence.
+
+---
+
+## Memory 0.6.0 — consumption evidence and durable jobs
+
+Memory 0.6.0 makes recall consumption and background memory work auditable without moving orchestration back into the Agent. Runtime recall returns a durable `recall_trace_id`; consumers can record `MemoryConsumptionReceipt` entries that separately represent presentation, reference and action use. This prevents a recall hit from being treated as proof that the model actually used the memory.
+
+Background extraction/consolidation work can be represented by durable `MemoryJob` rows with idempotency keys, worker leases, attempts and retry timestamps. The SQLite schema is v7 and `kitt-memoryd` remains the only durable semantic-memory authority.
+
+---
+
+---
+
+## Histórico anterior do CHANGELOG
+
 ## 0.10.0
 
 - Schema v10: optional multi-probe LSH vector candidate index and bounded Rust cosine ranking.
