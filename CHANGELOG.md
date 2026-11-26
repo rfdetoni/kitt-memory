@@ -1,5 +1,9 @@
 # Changelog — K.I.T.T. Memory
 
+## 0.10.3
+
+- Update rusqlite and uuid, align MSRV to Rust 1.89, and reuse dependency builds in CI.
+
 ## Histórico migrado do README
 
 ## Memory 0.10.2 — durable bounded backfill source
