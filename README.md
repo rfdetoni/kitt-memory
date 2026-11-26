@@ -1,6 +1,6 @@
 # K.I.T.T. Memory
 
-Versão **0.10.2**. Guia de uso, arquitetura e segurança. Consulte o [CHANGELOG.md](CHANGELOG.md) para versões anteriores.
+Versão **0.10.3**. Guia de uso, arquitetura e segurança. Consulte o [CHANGELOG.md](CHANGELOG.md) para versões anteriores.
 
 ## What’s included
 
